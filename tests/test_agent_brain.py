@@ -36,7 +36,7 @@ class FakeProvider:
     def is_available(self):
         return True
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2):
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
         self.calls.append({"tools": [tool["function"]["name"] for tool in tools or []], "json_mode": json_mode})
         return self.replies.pop(0)
 
@@ -75,7 +75,7 @@ def test_full_session_diagnose_fix_and_verify(monkeypatch):
     monkeypatch.setenv("AUTO_FIX_MAX_RISK", "none")
 
     session_id = session_store.create_session("local", "test box", "Windows", "internet slow", None)
-    asyncio.run(planner.run_diagnosis(session_id))
+    asyncio.run(planner.run_diagnosis(session_id, mode="deep"))
 
     session = session_store.get_session(session_id)
     assert session["status"] == "diagnosed"

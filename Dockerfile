@@ -1,4 +1,4 @@
-# Sentinel server (FastAPI dashboard + agentic troubleshooter).
+# AIops server (FastAPI dashboard + agentic troubleshooter).
 FROM python:3.12-slim
 
 # Network tools the diagnostics use (ping, ip route) inside the container.
@@ -27,4 +27,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/login', timeout=4)"
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# One worker on purpose: live session events and agent task wake-ups are in-process.
+# uvloop + httptools (from uvicorn[standard]) make the async server faster.
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop", "--http", "httptools", "--no-access-log"]

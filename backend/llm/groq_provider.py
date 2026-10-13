@@ -48,8 +48,13 @@ class GroqProvider:
                 converted.append({"role": message["role"], "content": message.get("content") or ""})
         return converted
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2):
+    def warm_up(self):
+        return self.is_available()
+
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
         kwargs = {"model": self.model, "messages": self._to_openai(messages), "temperature": temperature}
+        if max_tokens:
+            kwargs["max_tokens"] = int(max_tokens)
         if tools:
             kwargs["tools"] = tools
         elif json_mode:

@@ -64,6 +64,18 @@ class OllamaProvider:
     def refresh(self):
         self._status = None
 
+    def warm_up(self):
+        """Load the model into RAM ahead of the first request (an empty generate only loads it).
+        Called at startup and at the start of each diagnosis, so loading overlaps evidence collection."""
+        if not self.is_available():
+            return False
+        try:
+            httpx.post(f"{self.host}/api/generate", json={"model": self.model, "keep_alive": self.keep_alive, "options": {"num_ctx": self.num_ctx}}, timeout=self.timeout).raise_for_status()
+            return True
+        except httpx.HTTPError as error:
+            logger.warning("Ollama warm-up failed: %s", error)
+            return False
+
     # -- chat ---------------------------------------------------------------
 
     @staticmethod
@@ -83,12 +95,16 @@ class OllamaProvider:
                 converted.append({"role": role, "content": message.get("content") or ""})
         return converted
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2):
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
+        options = {"temperature": temperature, "num_ctx": self.num_ctx}
+        if max_tokens:
+            # Generation is the slowest part on a CPU; a cap keeps the worst case bounded.
+            options["num_predict"] = int(max_tokens)
         body = {
             "model": self.model,
             "messages": self._to_ollama(messages),
             "stream": False,
-            "options": {"temperature": temperature, "num_ctx": self.num_ctx},
+            "options": options,
             "keep_alive": self.keep_alive,
         }
         if tools:
@@ -109,7 +125,13 @@ class OllamaProvider:
             detail = response.text[:300]
             logger.error("Ollama rejected request: %s", detail)
             raise LLMModelError(f"Ollama rejected the request: {detail}")
-        message = response.json().get("message", {})
+        payload = response.json()
+        logger.info(
+            "Ollama %s: prompt %s tok in %.1fs, output %s tok in %.1fs (load %.1fs)",
+            self.model, payload.get("prompt_eval_count"), (payload.get("prompt_eval_duration") or 0) / 1e9,
+            payload.get("eval_count"), (payload.get("eval_duration") or 0) / 1e9, (payload.get("load_duration") or 0) / 1e9,
+        )
+        message = payload.get("message", {})
         calls = []
         for call in message.get("tool_calls") or []:
             function = call.get("function", {})

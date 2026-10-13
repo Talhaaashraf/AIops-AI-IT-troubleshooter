@@ -1,9 +1,9 @@
 > Approved plan from the planning session (2026-10-09). Kept verbatim for reference; see 03-implementation-log.md for what changed during the build.
 
-# Sentinel → Agentic AI IT Troubleshooter (Ollama brain)
+# AIops → Agentic AI IT Troubleshooter (Ollama brain)
 
 ## Context
-Sentinel today is a **read-only monitor**: FastAPI + psutil collect telemetry, a rules engine raises alerts, and Groq (cloud, needs API key) only *explains* data in one shot. Remote agents (`agent/monitor_agent.py`) only **push** reports — the server cannot send them work, and nothing gets fixed.
+AIops today is a **read-only monitor**: FastAPI + psutil collect telemetry, a rules engine raises alerts, and Groq (cloud, needs API key) only *explains* data in one shot. Remote agents (`agent/monitor_agent.py`) only **push** reports — the server cannot send them work, and nothing gets fixed.
 
 Goal: turn it into an **agentic troubleshooter** that runs on a free local LLM (Ollama). The user types a problem ("internet slow", "laptop hang ho raha hai"), the AI agent decides which diagnostic tools to run, gathers evidence, finds the root cause, proposes fixes, and applies them on an **Action button** click — on the local machine or any remote device enrolled Wazuh-style via a one-line install script. Purpose: automate the diagnose process and save technician time.
 

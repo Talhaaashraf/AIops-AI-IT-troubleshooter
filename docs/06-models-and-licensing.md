@@ -27,6 +27,6 @@ To migrate another model, run `python models/migrate_model.py qwen2.5:7b`. To re
 | `qwen2.5:7b` | Apache 2.0 | Yes |
 | `llama3.2:3b` | Llama 3.2 Community License | Yes, with conditions (attribution, acceptable-use policy) |
 
-If Sentinel is used inside a company or sold, switch the default to `qwen2.5:7b` (if the hardware allows) or `llama3.2:3b`. Then migrate that model and rebuild `sentinel-tech` on top of it.
+If AIops is used inside a company or sold, switch the default to `qwen2.5:7b` (if the hardware allows) or `llama3.2:3b`. Then migrate that model and rebuild `sentinel-tech` on top of it.
 
 The Qwen license also requires the notice "Built with Qwen" on derived models. The `sentinel-tech` Modelfile includes it.

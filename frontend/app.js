@@ -381,6 +381,7 @@ async function diagnoseEventLogs() {
 async function checkAI() {
   try {
     const status = await fetch('/api/ai/status').then((response) => response.json());
+    applyAiAvailability(Boolean(status.available), status.diagnosis_mode);
     $('ai-banner').classList.toggle('hidden', Boolean(status.available));
     if (!status.available) setText('ai-banner-detail', `${status.message} Local monitoring remains active.`);
     setText('ai-model-label', `AI: ${status.provider} / ${status.model || '--'} ${status.available ? '(ready)' : '(unavailable)'} / auto-fix: ${status.auto_fix_max_risk}`);
@@ -391,10 +392,46 @@ async function checkAI() {
       ? `${status.model}${learned && version ? ` v${version} · self-improved` : ''}`
       : 'AI offline');
   } catch (_error) {
+    applyAiAvailability(false);
     $('ai-banner').classList.remove('hidden');
     $('ai-chip').className = 'ai-chip off';
     setText('ai-chip-text', 'AI offline');
   }
+}
+
+function storedMode() {
+  try {
+    return localStorage.getItem('sentinel-ts-mode');
+  } catch (_error) {
+    return null;
+  }
+}
+
+function setMode(mode, remember = true) {
+  if (!['instant', 'fast', 'deep'].includes(mode)) return;
+  if (!tsAiAvailable && mode !== 'instant') mode = 'instant';
+  tsMode = mode;
+  document.querySelectorAll('.mode-option').forEach((option) => {
+    const active = option.dataset.mode === mode;
+    option.classList.toggle('active', active);
+    option.setAttribute('aria-checked', String(active));
+  });
+  if (remember) {
+    try {
+      localStorage.setItem('sentinel-ts-mode', mode);
+    } catch (_error) { /* storage unavailable: keep the choice for this page only */ }
+  }
+}
+
+function applyAiAvailability(available, defaultMode) {
+  tsAiAvailable = available;
+  document.querySelectorAll('.mode-option').forEach((option) => {
+    if (option.dataset.mode !== 'instant') {
+      option.disabled = !available;
+      option.title = available ? '' : 'AI is offline: the instant rule-based diagnosis still works';
+    }
+  });
+  setMode(storedMode() || defaultMode || 'fast', false);
 }
 
 // ============================================================================
@@ -585,22 +622,31 @@ async function diagnoseDevice(deviceId) {
 const INSTALL_COMMANDS = {
   windows: {
     hint: 'Open PowerShell as Administrator on the Windows device and run:',
-    install: (server, token) => `irm "${server}/install/windows.ps1?token=${token}&server=${encodeURIComponent(server)}" | iex`,
+    install: (server, token) => `irm "${installUrl(server, "windows.ps1", token)}" | iex`,
     uninstall: (server) => `irm "${server}/install/uninstall-windows.ps1" | iex`,
   },
   linux: {
     hint: 'Open a terminal on the Linux device and run (needs sudo):',
-    install: (server, token) => `curl -fsSL "${server}/install/linux.sh?token=${token}&server=${encodeURIComponent(server)}" | sudo bash`,
+    install: (server, token) => `curl -fsSL "${installUrl(server, "linux.sh", token)}" | sudo bash`,
     uninstall: (server) => `curl -fsSL "${server}/install/uninstall-linux.sh" | sudo bash`,
   },
   mac: {
     hint: 'Open Terminal on the Mac and run (needs an admin password):',
-    install: (server, token) => `curl -fsSL "${server}/install/macos.sh?token=${token}&server=${encodeURIComponent(server)}" | sudo bash`,
+    install: (server, token) => `curl -fsSL "${installUrl(server, "macos.sh", token)}" | sudo bash`,
     uninstall: (server) => `curl -fsSL "${server}/install/uninstall-macos.sh" | sudo bash`,
   },
 };
 
 let enrollWaitTimer = null;
+let openEnrollment = false;
+
+function installUrl(server, script, token) {
+  const query = new URLSearchParams();
+  if (token) query.set('token', token);
+  if (server !== location.origin) query.set('server', server);
+  const text = query.toString();
+  return `${server}/install/${script}${text ? `?${text}` : ''}`;
+}
 
 function enrollServer() {
   return ($('enroll-server').value.trim() || location.origin).replace(/\/+$/, '');
@@ -621,8 +667,9 @@ function updateInstallInstructions() {
   $('enroll-server-warning').classList.toggle('hidden', !isLocalOnlyServer(server));
   setText('install-hint', commands.hint);
   setText('uninstall-command', commands.uninstall(server));
-  setText('install-command', generatedToken ? commands.install(server, generatedToken) : 'Generate a token first.');
-  $('copy-install').disabled = !generatedToken;
+  const ready = openEnrollment || generatedToken;
+  setText('install-command', ready ? commands.install(server, generatedToken) : 'Generate a token first.');
+  $('copy-install').disabled = !ready;
 }
 
 async function generateToken() {
@@ -708,9 +755,18 @@ async function downloadAgent() {
   }
 }
 
-function loadAddAgent() {
-  if (!$('enroll-server').value) $('enroll-server').value = location.origin;
+async function loadAddAgent() {
+  try {
+    const info = await fetch('/api/agents/enrollment').then((response) => response.json());
+    openEnrollment = Boolean(info.open);
+    if (!$('enroll-server').value) $('enroll-server').value = info.server_url || location.origin;
+  } catch (_error) {
+    if (!$('enroll-server').value) $('enroll-server').value = location.origin;
+  }
+  $('enroll-token-step').classList.toggle('hidden', openEnrollment);
+  setText('enroll-run-number', openEnrollment ? '2' : '3');
   updateInstallInstructions();
+  if (openEnrollment && !enrollWaitTimer) waitForNewDevice();
 }
 
 // ============================================================================
@@ -731,7 +787,10 @@ let tsPlaybookId = null;
 let tsPlaybooks = [];
 let tsRefreshPending = false;
 const tsFeedback = {};
-let tsPendingStep = null;
+// Checks run in parallel, so several can be in flight at once (keyed by tool + args).
+const tsPendingSteps = new Map();
+let tsMode = 'fast';
+let tsAiAvailable = true;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -811,12 +870,12 @@ async function startTroubleshoot() {
   }
   const button = $('ts-start');
   button.disabled = true;
-  setText('ts-form-status', 'Starting the AI agent...');
+  setText('ts-form-status', tsMode === 'instant' ? 'Running instant checks...' : 'Starting the AI agent...');
   try {
     const response = await fetch('/api/troubleshoot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issue, device_id: $('ts-device').value, playbook_id: tsPlaybookId }),
+      body: JSON.stringify({ issue, device_id: $('ts-device').value, playbook_id: tsPlaybookId, mode: tsMode }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not start troubleshooting');
@@ -830,9 +889,13 @@ async function startTroubleshoot() {
   }
 }
 
+function pendingKey(item) {
+  return `${item.tool_id}|${JSON.stringify(item.args || {})}`;
+}
+
 function openTroubleshootSession(sessionId) {
   tsSessionId = sessionId;
-  tsPendingStep = null;
+  tsPendingSteps.clear();
   $('ts-session').classList.remove('hidden');
   $('ts-steps').innerHTML = '';
   $('ts-report').innerHTML = '<p class="soft-label">Loading session...</p>';
@@ -851,10 +914,11 @@ function connectTroubleshootStream(sessionId) {
     const message = JSON.parse(event.data);
     if (message.type === 'snapshot') renderTroubleshootSession(message.session);
     else if (message.type === 'step_started') {
-      tsPendingStep = message;
+      tsPendingSteps.set(pendingKey(message), message);
       $('ts-steps').appendChild(pendingStepElement(message));
     } else {
-      if (message.type === 'step' || message.type === 'error') tsPendingStep = null;
+      if (message.type === 'step' && message.step.tool_id) tsPendingSteps.delete(pendingKey(message.step));
+      if (message.type === 'error' || message.type === 'report') tsPendingSteps.clear();
       refreshTroubleshootSession();
     }
   };
@@ -891,7 +955,16 @@ function pendingStepElement(message) {
   return item;
 }
 
+function renderFindings(findings) {
+  if (!findings || !findings.length) return '<p class="soft-label">The instant checks found nothing abnormal.</p>';
+  return `<ul class="ts-findings">${findings.map((item) => `
+    <li><span class="severity severity-${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.detail)}</small></li>`).join('')}</ul>`;
+}
+
 function renderStep(step) {
+  if (step.kind === 'findings') {
+    return `<li class="ts-step findings"><span class="ts-step-icon"></span><div><small>INSTANT CHECKS</small><p>${escapeHtml(step.text)}</p></div></li>`;
+  }
   if (step.kind === 'thought') {
     return `<li class="ts-step thought"><span class="ts-step-icon"></span><div><small>AI</small><p>${escapeHtml(step.text)}</p></div></li>`;
   }
@@ -915,7 +988,7 @@ function renderFix(fix, index, session) {
   return `<div class="ts-fix ${fix.learned ? 'learned' : ''}">
     <div class="ts-fix-head">
       <strong>${escapeHtml(toolLabel(fix.tool_id))}${escapeHtml(argsLabel(fix.args))}</strong>
-      <span class="button-row">${fix.learned ? '<span class="learned-badge">learned</span>' : ''}<span class="risk risk-${escapeHtml(fix.risk)}">${escapeHtml(fix.risk)} risk</span></span>
+      <span class="button-row">${fix.learned ? '<span class="learned-badge">learned</span>' : ''}${fix.rule ? '<span class="rule-badge">rule</span>' : ''}<span class="risk risk-${escapeHtml(fix.risk)}">${escapeHtml(fix.risk)} risk</span></span>
     </div>
     <p>${escapeHtml(fix.why || fix.description)}</p>
     ${result}
@@ -930,8 +1003,12 @@ function renderTroubleshootSession(session) {
   pill.className = `status-pill ${STATUS_TONES[session.status] || 'unknown'}`;
   pill.textContent = STATUS_LABELS[session.status] || session.status;
 
-  $('ts-steps').innerHTML = (session.steps || []).map(renderStep).join('') || (tsPendingStep ? '' : '<li class="soft-label">Starting...</li>');
-  if (tsPendingStep && !TERMINAL_STATUSES.includes(session.status)) $('ts-steps').appendChild(pendingStepElement(tsPendingStep));
+  const steps = session.steps || [];
+  // Steps that already finished are no longer pending (covers events missed while reconnecting).
+  steps.forEach((step) => { if (step.tool_id) tsPendingSteps.delete(pendingKey(step)); });
+  if (TERMINAL_STATUSES.includes(session.status)) tsPendingSteps.clear();
+  $('ts-steps').innerHTML = steps.map(renderStep).join('') || (tsPendingSteps.size ? '' : '<li class="soft-label">Starting...</li>');
+  tsPendingSteps.forEach((pending) => $('ts-steps').appendChild(pendingStepElement(pending)));
 
   const report = session.report;
   const container = $('ts-report');
@@ -940,27 +1017,36 @@ function renderTroubleshootSession(session) {
     return;
   }
   if (!report) {
-    container.innerHTML = '<p class="soft-label"><span class="spinner"></span> The agent is collecting evidence and reasoning. On a laptop CPU this can take a few minutes.</p>';
+    const findingsStep = steps.find((step) => step.kind === 'findings');
+    container.innerHTML = findingsStep
+      ? `<small class="ts-label">INSTANT FINDINGS</small>${renderFindings(findingsStep.result?.data)}<p class="soft-label"><span class="spinner"></span> The AI is writing the full diagnosis from these results...</p>`
+      : '<p class="soft-label"><span class="spinner"></span> Running the checks in parallel...</p>';
     return;
   }
+  const modeLabel = { instant: 'Instant rule-based diagnosis', fast: 'Fast AI diagnosis', deep: 'Deep AI diagnosis' }[report.mode] || 'Diagnosis';
+  const timing = report.timing ? `<p class="ts-timing">${escapeHtml(modeLabel)} in ${report.timing.total_seconds}s (checks ${report.timing.evidence_seconds}s${report.mode === 'instant' ? '' : `, AI ${report.timing.ai_seconds}s`})</p>` : '';
+  const quickFindings = report.mode !== 'instant' && (report.quick_findings || []).length
+    ? `<details class="ts-similar"><summary class="ts-label">INSTANT FINDINGS (${report.quick_findings.length})</summary>${renderFindings(report.quick_findings)}</details>` : '';
   const evidence = (report.evidence || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('');
   const manual = (report.manual_steps || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('');
   const fixes = (report.proposed_fixes || []).map((fix, index) => renderFix(fix, index, session)).join('');
   const verify = session.verify ? `
     <div class="ts-verify ${session.verify.resolved ? 'ok' : session.verify.resolved === false ? 'failed' : ''}">
-      <small>VERIFICATION AFTER ${escapeHtml(toolLabel(session.verify.after_fix))}</small>
+      <small>VERIFICATION AFTER ${escapeHtml(toolLabel(session.verify.after_fix))}${session.verify.method === 'rules' ? ' · RULE RE-CHECK' : ''}</small>
       <strong>${session.verify.resolved ? 'Issue resolved' : session.verify.resolved === false ? 'Issue not resolved yet' : 'Not verified'}</strong>
       <p>${escapeHtml(session.verify.explanation)}</p>
       ${(session.verify.next_steps || []).length ? `<ul>${session.verify.next_steps.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
     </div>` : '';
   container.innerHTML = `
     ${session.status === 'failed' && session.error ? `<p class="ts-error">${escapeHtml(session.error)}</p>` : ''}
+    ${timing}
     <div class="ts-root">
       <div class="ts-badges"><span class="severity severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)}</span><span class="soft-label">confidence: ${escapeHtml(report.confidence)}</span></div>
       <small>ROOT CAUSE</small>
       <strong>${escapeHtml(report.root_cause)}</strong>
     </div>
     ${evidence ? `<small class="ts-label">EVIDENCE</small><ul class="ts-list">${evidence}</ul>` : ''}
+    ${quickFindings}
     ${verify}
     <small class="ts-label">PROPOSED FIXES</small>
     ${fixes || '<p class="soft-label">No automatic fix applies. Follow the manual steps below.</p>'}
@@ -1005,7 +1091,7 @@ async function sendFeedback(kind) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not save feedback');
     tsFeedback[tsSessionId] = helpful ? 'up' : 'down';
-    toast(data.model_rebuilt ? 'Thanks! The Sentinel model was rebuilt with this lesson.' : 'Thanks! Saved as a learned case.');
+    toast(data.model_rebuilt ? 'Thanks! The AIops model was rebuilt with this lesson.' : 'Thanks! Saved as a learned case.');
     refreshTroubleshootSession();
     checkAI();
   } catch (error) {
@@ -1058,7 +1144,7 @@ async function loadLearning() {
 async function rebuildLearnedModel() {
   const button = $('learn-rebuild');
   button.disabled = true;
-  setText('learn-status', 'Rebuilding the Sentinel model from learned cases...');
+  setText('learn-status', 'Rebuilding the AIops model from learned cases...');
   try {
     const response = await fetch('/api/learning/rebuild', { method: 'POST' });
     const info = await response.json();
@@ -1149,6 +1235,10 @@ function wireEvents() {
   $('ts-playbooks').addEventListener('click', (event) => {
     const chip = event.target.closest('[data-playbook]');
     if (chip) selectPlaybook(chip.dataset.playbook);
+  });
+  $('ts-mode').addEventListener('click', (event) => {
+    const option = event.target.closest('[data-mode]');
+    if (option && !option.disabled) setMode(option.dataset.mode);
   });
   $('ts-history').addEventListener('click', (event) => {
     const item = event.target.closest('[data-session]');

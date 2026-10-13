@@ -168,7 +168,7 @@ def restart_service(name):
       params={"pid": {"type": "integer", "minimum": 5, "maximum": 4194304}, "expected_name": {"type": "string", "maxLength": 120, "description": "Exact process name, e.g. chrome.exe"}}, required=("pid", "expected_name"))
 def kill_process(pid, expected_name):
     if pid in (os.getpid(), os.getppid()):
-        return {"ok": False, "summary": "Refusing to stop the Sentinel agent itself"}
+        return {"ok": False, "summary": "Refusing to stop the AIops agent itself"}
     try:
         process = psutil.Process(pid)
         name = process.name()
@@ -194,7 +194,7 @@ def kill_process(pid, expected_name):
     return {"ok": True, "changed": True, "summary": f"Stopped {name} (pid {pid})", "rollback_hint": f"Start {name} again if it was needed."}
 
 
-@tool("disable_startup_item", "Stop a program from launching at login by moving its Run-key entry to a Sentinel backup key (reversible with restore_startup_item).", risk="medium", os=WINDOWS,
+@tool("disable_startup_item", "Stop a program from launching at login by moving its Run-key entry to a AIops backup key (reversible with restore_startup_item).", risk="medium", os=WINDOWS,
       params={"name": {"type": "string", "maxLength": 200, "description": "Startup entry name as shown by startup_programs"}}, required=("name",))
 def disable_startup_item(name):
     import winreg
@@ -213,7 +213,7 @@ def disable_startup_item(name):
     return {"ok": False, "summary": f"No Run-key startup entry named '{name}' (startup-folder shortcuts must be removed manually)"}
 
 
-@tool("restore_startup_item", "Re-enable a startup item previously disabled by Sentinel.", risk="low", os=WINDOWS,
+@tool("restore_startup_item", "Re-enable a startup item previously disabled by AIops.", risk="low", os=WINDOWS,
       params={"name": {"type": "string", "maxLength": 200}}, required=("name",))
 def restore_startup_item(name):
     import winreg
@@ -229,7 +229,7 @@ def restore_startup_item(name):
             continue
         except PermissionError:
             return {"ok": False, "summary": "Access denied (administrator rights required)"}
-    return {"ok": False, "summary": f"No Sentinel-disabled startup item named '{name}'"}
+    return {"ok": False, "summary": f"No AIops-disabled startup item named '{name}'"}
 
 
 # ---------------------------------------------------------------------------

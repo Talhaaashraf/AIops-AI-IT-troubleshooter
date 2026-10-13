@@ -1,4 +1,4 @@
-"""Pluggable LLM providers for the Sentinel technician and troubleshooting agent.
+"""Pluggable LLM providers for the AIops technician and troubleshooting agent.
 
 LLM_PROVIDER=ollama (default, free, runs locally) or LLM_PROVIDER=groq.
 

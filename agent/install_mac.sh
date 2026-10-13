@@ -12,4 +12,4 @@ cat > "$PLIST" <<EOF
 <plist version="1.0"><dict><key>Label</key><string>com.sentinel.monitor-agent</string><key>ProgramArguments</key><array><string>$INSTALL_DIR/monitor_agent</string></array><key>WorkingDirectory</key><string>$INSTALL_DIR</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>
 EOF
 launchctl unload "$PLIST" 2>/dev/null || true; launchctl load "$PLIST"
-echo "Sentinel agent installed in $INSTALL_DIR"
+echo "AIops agent installed in $INSTALL_DIR"

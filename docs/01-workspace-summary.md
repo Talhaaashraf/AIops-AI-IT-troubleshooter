@@ -1,6 +1,6 @@
 # Workspace summary (before the AI work)
 
-Sentinel started as a Wazuh-style **device health monitor** for Windows, macOS and Linux, about 3,700 lines of code.
+AIops started as a Wazuh-style **device health monitor** for Windows, macOS and Linux, about 3,700 lines of code.
 
 - **Backend (FastAPI).** `backend/main.py` collected telemetry with `psutil` every 5 seconds and streamed it over the `/ws/monitor` WebSocket. Separate modules ran security checks (firewall, antivirus, disk encryption, patches, listening ports), an on-demand performance benchmark, and OS event-log collection.
 - **Rules engine.** `backend/rules_engine.py` turned telemetry into alerts stored in SQLite (`alerts.db`).
@@ -12,7 +12,7 @@ Sentinel started as a Wazuh-style **device health monitor** for Windows, macOS a
 
 ## The goal
 
-1. Make Sentinel **fully agentic**, with a **free Ollama model** as the brain: it receives a problem, diagnoses the laptop, finds the issue, and fixes it.
+1. Make AIops **fully agentic**, with a **free Ollama model** as the brain: it receives a problem, diagnoses the laptop, finds the issue, and fixes it.
 2. Offer built-in **IT troubleshooting options** (common problems).
 3. Add a **"What's the issue?"** tab: you type the issue, it gets fully diagnosed, and you get **action buttons** to fix it.
 4. Add an agents tab with a **one-line script** (PowerShell, bash or macOS bash) that enrolls a machine so it can be troubleshot remotely, like Wazuh agents.

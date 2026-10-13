@@ -55,3 +55,50 @@
 - The Windows install script has not been run in an elevated shell, because it registers a SYSTEM task. Only script rendering and the agent bundle were tested.
 - The Linux and macOS install scripts have not been run on real machines.
 - High-risk fixes (SFC, DISM, network reset) have not been executed on any device.
+
+## Agent "connects then disconnects" (2026-10-09)
+
+The first install on the development PC never connected.
+
+- **Cause.** The Python-mode venv was built on the Microsoft Store Python, so the SYSTEM task exited instantly with code 101. There was no log, and `device_id` stayed empty.
+- **Why it looked connected.** The "connected, then offline" seen in the dashboard was the 25-second `EXE-TEST` run, followed by the server being stopped.
+- **Installer fixes.**
+  - Rejects interpreters that resolve inside `WindowsApps`.
+  - Prefers the `.exe`, migrates the old config, and removes the stale runtime.
+  - Verifies the first successful report before saying it is connected; otherwise it prints the task result and the log tail.
+
+## Fast diagnosis and hardware checks (2026-10-13)
+
+Goal: cut the time to diagnose a laptop's OS and hardware problems. Before: about 3 minutes per diagnosis (sequential checks, up to 4 CPU-bound LLM calls).
+
+- **Parallel baseline.** Playbook checks run concurrently in two phases: the CPU-sensitive ones (`system_overview`, `top_processes`) first, then everything else. The remote agent runs up to 4 read-only checks at once; fixes stay one at a time.
+- **No more 1-second polling.** The agent's long-poll and the planner's wait for a remote result used to poll SQLite every second. They are now woken immediately (`backend/task_signals.py`), and the database stays the source of truth.
+- **Instant findings** (`backend/agent_brain/findings.py`). Rules over every check's output, ready in milliseconds. They are shown first and fed to the LLM as facts. They also act as the full report in Instant mode or when the AI is down or times out, and they verify fixes without an AI call.
+- **Speed modes:** instant / fast (default) / deep. Fast mode skips investigation when a playbook matched and makes one report call.
+- **Smaller AI calls.**
+  - The model no longer writes the evidence list or the issue summary; the server builds them.
+  - Fast mode sends one summary line per check instead of raw data.
+  - Output is capped (`num_predict`).
+  - Measured on the dev laptop: about 1,700 prompt and 350 output tokens became about 800 and 70-150.
+- **Model preloading.** At startup, and in parallel with each diagnosis's checks.
+- **Grounding guards.**
+  - Fixes the device would refuse are never proposed: services not on the allow-list (the model once proposed restarting `uvicorn`) and protected processes.
+  - A full check-up, or a clean low-confidence diagnosis, keeps only fixes tied to a finding.
+  - When the checks are clean, the prompt says so explicitly: the 3B model invented "overheating" otherwise.
+- **Hardware.**
+  - New `hardware_health` tool. On Windows it is one PowerShell call covering CPU model/clock, `% Processor Performance` (throttling), ACPI temperatures, RAM modules, GPU/driver, Device Manager error codes and WHEA errors.
+  - `% Processor Performance` uses `Get-Counter` (~1 s); the WMI perf class took 54 s on first use.
+  - New `rescan_hardware` fix (Windows, low risk). New Hardware check and OS health playbooks; `hardware_health` was added to the slow PC, high usage, crashes and check-up playbooks.
+- **Fixed on the real laptop.**
+  - `top_processes` CPU and memory views now share one sample. On Windows, each process the agent cannot open costs a full system query; together the two views took 11.5 s.
+  - FAT32/exFAT drives no longer raise "disk full": the Google Drive mount reported G: as 100% full.
+
+Measured on the dev laptop (i5-1235U, Docker, qwen2.5:3b, laptop under heavy load):
+
+| Run | Checks | AI | Total |
+| --- | --- | --- | --- |
+| Instant, slow PC, via agent | 11 s | - | 11 s |
+| Fast, hardware check, via agent | 7 s | 32 s | 40 s |
+| Fast, full check-up, server container | 3 s | 23 s | 26 s |
+
+Still not verified: temperature readings need the agent to run as SYSTEM/Administrator (the test agent ran as a normal user). The 3B model can still draw a weak link between findings (for example blaming a firmware device for heat); `qwen2.5:7b` reasons better if RAM allows.

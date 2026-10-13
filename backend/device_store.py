@@ -87,7 +87,12 @@ def create_pending_token(hours=24):
     return token, expires_at
 
 
-def register_device(token, hostname, os_type, nickname="", device_id=None):
+MIN_SELF_TOKEN_LENGTH = 24
+
+
+def register_device(token, hostname, os_type, nickname="", device_id=None, allow_open=False):
+    """Claim a pending enrollment token, re-register a known device, or (open enrollment)
+    enroll a new device with a secret it generated itself."""
     token_hash = hash_token(token)
     now = utc_now()
     with _connect() as connection:
@@ -111,6 +116,8 @@ def register_device(token, hostname, os_type, nickname="", device_id=None):
             token_expires_at = existing["token_expires_at"]
             if token_expires_at and datetime.fromisoformat(token_expires_at) <= datetime.now(timezone.utc):
                 raise ValueError("Agent token has expired")
+        elif allow_open and len(token) >= MIN_SELF_TOKEN_LENGTH:
+            token_expires_at = None
         else:
             raise ValueError("Invalid or unclaimed agent token")
 

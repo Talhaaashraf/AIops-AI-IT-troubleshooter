@@ -13,5 +13,5 @@ if (-not (Test-Path $configPath)) {
 }
 $action = New-ScheduledTaskAction -Execute (Join-Path $installDir 'monitor_agent.exe') -WorkingDirectory $installDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName 'Sentinel Monitor Agent' -Action $action -Trigger $trigger -Description 'Read-only Sentinel health reporter' -Force | Out-Null
-Write-Host "Sentinel agent installed and scheduled at $installDir"
+Register-ScheduledTask -TaskName 'Sentinel Monitor Agent' -Action $action -Trigger $trigger -Description 'Read-only AIops health reporter' -Force | Out-Null
+Write-Host "AIops agent installed and scheduled at $installDir"

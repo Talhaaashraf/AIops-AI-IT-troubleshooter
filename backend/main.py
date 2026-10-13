@@ -18,11 +18,12 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools
 
+from . import task_signals
 from .actions import run_action
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import session_store
 from .agent_brain.executor import LOCAL_DEVICE_ID, resolve_target
-from .agent_brain.planner import apply_fix, auto_fix_max_risk, run_diagnosis
+from .agent_brain.planner import apply_fix, auto_fix_max_risk, default_mode, normalize_mode, run_diagnosis
 from .agent_brain.playbooks import public_playbooks
 from .learning import model_builder
 from .learning import store as learning_store
@@ -38,7 +39,7 @@ from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, 
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, list_tasks
 
-app = FastAPI(title="Sentinel Device Health Monitor")
+app = FastAPI(title="AIops Device Health Monitor")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,11 @@ INSTALL_TEMPLATES_DIR = Path(__file__).resolve().parent / "install_templates"
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 logger = logging.getLogger(__name__)
+# Uvicorn only configures its own loggers; without this the app's INFO lines (AI timings,
+# model preload, session failures below ERROR) never reach `docker compose logs`.
+logging.getLogger("backend").setLevel(logging.INFO)
+if not logging.getLogger().handlers:
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 # In-memory state for the local-server monitor loop and its dashboard-facing caches.
 connections = set()
@@ -140,10 +146,21 @@ async def start_monitor():
     session_store.mark_interrupted_sessions()
     status = ai_status()
     logger.info("AI provider: %s / %s - %s", status.get("provider"), status.get("model"), status.get("message"))
+    _spawn(asyncio.to_thread(warm_up_llm))
     asyncio.create_task(monitor_loop())
     asyncio.create_task(offline_loop())
     asyncio.create_task(security_loop())
     asyncio.create_task(event_log_loop())
+
+
+def warm_up_llm():
+    """Preload the model so the first diagnosis does not wait for it to load from disk."""
+    warm = getattr(get_llm_provider(), "warm_up", None)
+    try:
+        if warm and warm():
+            logger.info("AI model preloaded")
+    except Exception:
+        logger.warning("Could not preload the AI model", exc_info=True)
 
 
 async def monitor_loop():
@@ -313,7 +330,7 @@ def register_agent(payload: dict):
     if not token or not hostname:
         raise HTTPException(status_code=400, detail="token and hostname are required")
     try:
-        return register_device(token, hostname, str(payload.get("os_type", "Unknown")), str(payload.get("nickname", "")), payload.get("device_id"))
+        return register_device(token, hostname, str(payload.get("os_type", "Unknown")), str(payload.get("nickname", "")), payload.get("device_id"), allow_open=open_enrollment())
     except ValueError as error:
         raise HTTPException(status_code=401, detail="Invalid or expired agent token") from error
 
@@ -507,7 +524,7 @@ def agent_chat(payload: dict):
 
 @app.get("/api/ai/status")
 def ai_status_endpoint():
-    return {**ai_status(), "auto_fix_max_risk": auto_fix_max_risk() or "none", "learned_model": model_builder.version_info()}
+    return {**ai_status(), "auto_fix_max_risk": auto_fix_max_risk() or "none", "diagnosis_mode": default_mode(), "learned_model": model_builder.version_info()}
 
 
 # ============================================================================
@@ -551,12 +568,11 @@ async def start_troubleshoot(payload: dict):
     target = resolve_target(str(payload.get("device_id") or LOCAL_DEVICE_ID))
     if target is None:
         raise HTTPException(status_code=404, detail="Device not found")
-    status = await asyncio.to_thread(ai_status)
-    if not status.get("available"):
-        raise HTTPException(status_code=503, detail=status.get("message", "AI provider unavailable"))
+    # Without a working AI the session still runs and returns the instant rule-based diagnosis.
+    mode = normalize_mode(payload.get("mode"))
     session_id = session_store.create_session(target.device_id, target.label, target.os_type, issue, playbook_id)
-    _spawn(run_diagnosis(session_id))
-    return {"session_id": session_id, "status": "queued", "device": target.label}
+    _spawn(run_diagnosis(session_id, mode))
+    return {"session_id": session_id, "status": "queued", "device": target.label, "mode": mode}
 
 
 @app.get("/api/troubleshoot/sessions")
@@ -625,24 +641,30 @@ TASK_RESULT_MAX_BYTES = 200_000
 @app.get("/api/agents/tasks/next")
 async def agent_next_task(request: Request, wait: int = 25):
     device = authenticated_device(request)
-    for _ in range(max(1, min(wait, 30))):
-        task = await asyncio.to_thread(claim_next_task, device["device_id"])
-        if task:
-            return {"task": {key: task[key] for key in ("task_id", "tool_id", "args", "max_risk", "timeout_seconds")}}
-        await asyncio.sleep(1)
-    return {"task": None}
+    deadline = asyncio.get_running_loop().time() + max(1, min(wait, 30))
+    while True:
+        # Listen before claiming so a task enqueued in between still wakes this poll at once.
+        with task_signals.listen(task_signals.device_key(device["device_id"])) as queued:
+            task = await asyncio.to_thread(claim_next_task, device["device_id"])
+            if task:
+                return {"task": {key: task[key] for key in ("task_id", "tool_id", "args", "max_risk", "timeout_seconds")}}
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return {"task": None}
+            await task_signals.wait(queued, min(remaining, 5))
 
 
 @app.post("/api/agents/tasks/{task_id}/result")
-def agent_task_result(task_id: str, payload: dict, request: Request):
-    device = authenticated_device(request)
+async def agent_task_result(task_id: str, payload: dict, request: Request):
+    device = await asyncio.to_thread(authenticated_device, request)
     result = {key: payload.get(key) for key in TASK_RESULT_KEYS}
     result["ok"] = bool(result["ok"])
     result["summary"] = str(result["summary"] or "")[:2000]
     if len(json.dumps(result.get("data"), default=str)) > TASK_RESULT_MAX_BYTES:
         result["data"] = "(result data too large; truncated by server)"
-    if not complete_task(task_id, device["device_id"], result):
+    if not await asyncio.to_thread(complete_task, task_id, device["device_id"], result):
         raise HTTPException(status_code=409, detail="Task is not running for this device (expired or unknown)")
+    task_signals.notify(task_signals.task_key(task_id))
     return {"accepted": True}
 
 
@@ -674,7 +696,19 @@ def _server_url(request, override=None):
     return str(request.base_url).rstrip("/")
 
 
+def open_enrollment():
+    """When true, install scripts need no enrollment token: each agent generates its own secret."""
+    return os.getenv("OPEN_ENROLLMENT", "false").strip().lower() in ("1", "true", "yes")
+
+
+@app.get("/api/agents/enrollment")
+def enrollment_info(request: Request):
+    return {"open": open_enrollment(), "server_url": _server_url(request)}
+
+
 def _require_install_token(token):
+    if open_enrollment() and not token:
+        return
     if not TOKEN_PATTERN.match(token or "") or not is_valid_install_token(token):
         raise HTTPException(status_code=401, detail="Invalid or expired enrollment token. Generate a new one in the dashboard.")
 
@@ -687,7 +721,7 @@ def install_script(script_name: str, request: Request, token: str = "", server: 
     if needs_token:
         _require_install_token(token)
     text = (INSTALL_TEMPLATES_DIR / script_name).read_text(encoding="utf-8")
-    text = text.replace("__SERVER_URL__", _server_url(request, server)).replace("__TOKEN__", token if needs_token else "")
+    text = text.replace("__SERVER_URL__", _server_url(request, server)).replace("__TOKEN__", token if needs_token and token else "")
     text = text.replace("\r\n", "\n")
     if script_name.endswith(".ps1"):
         text = text.replace("\n", "\r\n")

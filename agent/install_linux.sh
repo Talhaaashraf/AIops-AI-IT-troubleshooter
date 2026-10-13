@@ -8,7 +8,7 @@ if [[ ! -f "$INSTALL_DIR/agent_config.json" ]]; then read -r -p "Central server 
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/sentinel-monitor-agent.service" <<EOF
 [Unit]
-Description=Sentinel read-only monitor agent
+Description=AIops read-only monitor agent
 [Service]
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/monitor_agent
@@ -17,4 +17,4 @@ Restart=always
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload; systemctl --user enable --now sentinel-monitor-agent.service || true
-echo "Sentinel agent installed in $INSTALL_DIR"
+echo "AIops agent installed in $INSTALL_DIR"

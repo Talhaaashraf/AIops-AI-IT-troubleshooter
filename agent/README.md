@@ -1,4 +1,4 @@
-# Sentinel Monitor Agent
+# AIops Monitor Agent
 
 The standalone `monitor_agent.py` works on Windows, macOS, and Linux. It reads `agent_config.json`, registers once with the central server, sends health snapshots at the configured interval, and long-polls the server for troubleshooting tasks (diagnostics and operator-approved fixes) that it runs from the shared allow-listed registry in `toolkit/`.
 

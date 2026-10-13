@@ -1,4 +1,4 @@
-# Sentinel: dashboard + agentic AI troubleshooter + local Ollama brain.
+# AIops: dashboard + agentic AI troubleshooter + local Ollama brain.
 #   docker compose up -d --build      then open http://localhost:8000
 #
 # The base model is loaded from ./models/<model-name>/ (see models/migrate_model.py),
@@ -11,7 +11,12 @@ services:
     image: ollama/ollama:latest
     restart: unless-stopped
     environment:
-      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      # CPU-friendly settings: one request at a time gets all cores and the smallest KV cache,
+      # flash attention cuts memory per token, and only one model stays loaded.
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_MAX_LOADED_MODELS: 1
+      OLLAMA_FLASH_ATTENTION: 1
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -60,11 +65,14 @@ services:
         required: false
     environment:
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      DIAGNOSIS_MODE: ${DIAGNOSIS_MODE:-fast}
       SENTINEL_DB_PATH: /data/sentinel.db
       SENTINEL_MODELS_DIR: /app/models
     volumes:
       - sentinel_data:/data
       - ./models:/app/models
+      - ./agent_builds:/app/agent_builds:ro
 
 volumes:
   ollama_data:

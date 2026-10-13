@@ -3,26 +3,24 @@
 import datetime
 import json
 import logging
-import os
 import platform
 import socket
 import sys
-import time
-import uuid
-from pathlib import Path
-
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import psutil
 import requests
 
 try:
-    from toolkit import TOOLKIT_VERSION, risk_rank, run_tool
+    from toolkit import TOOLKIT_VERSION, get_tool, risk_rank, run_tool
     from toolkit.event_logs import collect_event_log_report
     from toolkit.performance_checks import collect_performance_report
     from toolkit.security_checks import collect_security_report
 except ImportError:
-    from .toolkit import TOOLKIT_VERSION, risk_rank, run_tool
+    from .toolkit import TOOLKIT_VERSION, get_tool, risk_rank, run_tool
     from .toolkit.event_logs import collect_event_log_report
     from .toolkit.performance_checks import collect_performance_report
     from .toolkit.security_checks import collect_security_report
@@ -35,6 +33,9 @@ SECURITY_REFRESH_SECONDS = 300
 EVENT_LOG_REFRESH_SECONDS = 600
 DEFAULT_PERFORMANCE_INTERVAL_SECONDS = 1800
 TASK_POLL_WAIT_SECONDS = 25
+# Read-only diagnostics run side by side so a diagnosis' baseline finishes in the time of
+# its slowest check; fixes always run one at a time.
+MAX_PARALLEL_DIAGNOSTICS = 4
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _security_cache = {"data": None, "checked_at": 0}
 _performance_cache = {"data": None, "checked_at": 0}
@@ -186,34 +187,57 @@ def _task_result_for(config, task):
     return result
 
 
+def _post_result(base, headers, task, result):
+    for attempt in range(5):
+        try:
+            posted = requests.post(f"{base}/api/agents/tasks/{task['task_id']}/result", headers=headers, json=result, timeout=30)
+            if posted.status_code < 500:
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(2 ** attempt)
+
+
+def _run_task(config, base, headers, task, slots):
+    try:
+        logging.info("Running task %s: %s %s", task["task_id"], task["tool_id"], task.get("args"))
+        result = _task_result_for(config, task)
+        logging.info("Task %s finished ok=%s: %s", task["task_id"], result["ok"], result["summary"])
+        _post_result(base, headers, task, result)
+    except Exception:
+        logging.exception("Task %s crashed", task.get("task_id"))
+    finally:
+        slots.release()
+
+
 def task_worker(config, device_id):
     """Long-poll the server for diagnose/fix tasks (outbound only, works behind NAT)."""
     base = config["server_url"].rstrip("/")
     headers = {"Authorization": "Bearer " + config["AGENT_TOKEN"]}
+    diagnostics = ThreadPoolExecutor(MAX_PARALLEL_DIAGNOSTICS, thread_name_prefix="sentinel-diag")
+    fixes = ThreadPoolExecutor(1, thread_name_prefix="sentinel-fix")
+    slots = threading.BoundedSemaphore(MAX_PARALLEL_DIAGNOSTICS)
     delay = 2
     while True:
+        # Only claim a task when a worker is free, so claimed tasks never wait in a local queue.
+        slots.acquire()
         try:
             response = requests.get(f"{base}/api/agents/tasks/next", headers=headers, params={"wait": TASK_POLL_WAIT_SECONDS}, timeout=TASK_POLL_WAIT_SECONDS + 15)
             if response.status_code == 404:
                 logging.warning("Server does not support remote tasks; task polling disabled")
+                slots.release()
                 return
             response.raise_for_status()
             task = response.json().get("task")
             delay = 2
             if not task:
+                slots.release()
                 continue
-            logging.info("Running task %s: %s %s", task["task_id"], task["tool_id"], task.get("args"))
-            result = _task_result_for(config, task)
-            logging.info("Task %s finished ok=%s: %s", task["task_id"], result["ok"], result["summary"])
-            for attempt in range(5):
-                try:
-                    posted = requests.post(f"{base}/api/agents/tasks/{task['task_id']}/result", headers=headers, json=result, timeout=30)
-                    if posted.status_code < 500:
-                        break
-                except requests.RequestException:
-                    pass
-                time.sleep(2 ** attempt)
+            item = get_tool(task.get("tool_id"))
+            pool = diagnostics if item is not None and item.risk == "read" else fixes
+            pool.submit(_run_task, config, base, headers, task, slots)
         except Exception as error:
+            slots.release()
             logging.warning("Task polling failed: %s; retrying in %ss", error, delay)
             time.sleep(delay)
             delay = min(delay * 2, 60)

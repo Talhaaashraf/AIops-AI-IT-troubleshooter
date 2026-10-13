@@ -13,6 +13,7 @@ import platform
 import re
 import socket
 import tempfile
+import threading
 import time
 import urllib.request
 from collections import Counter
@@ -85,7 +86,7 @@ def system_overview():
             usage = psutil.disk_usage(partition.mountpoint)
         except (PermissionError, OSError):
             continue
-        disks.append({"mount": partition.mountpoint, "used_percent": round(usage.percent, 1), "free": human_size(usage.free), "total": human_size(usage.total)})
+        disks.append({"mount": partition.mountpoint, "fs": partition.fstype, "used_percent": round(usage.percent, 1), "free": human_size(usage.free), "total": human_size(usage.total)})
     battery = None
     try:
         sensed = psutil.sensors_battery()
@@ -116,13 +117,27 @@ def system_overview():
     return {"ok": True, "summary": summary, "data": data}
 
 
-@tool(
-    "top_processes",
-    "List the processes using the most CPU or memory right now (measured over one second).",
-    params={"sort_by": {"type": "string", "enum": ["cpu", "memory"], "description": "Sort by cpu or memory"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "How many processes (default 8)"}},
-)
-def top_processes(sort_by="cpu", limit=8):
-    processes = list(psutil.process_iter(["pid", "name", "memory_percent", "memory_info", "username"]))
+# CPU% needs two readings one second apart for every process. On Windows each reading of a
+# process the agent cannot open falls back to a full system query, so one sample costs seconds.
+# Calls that arrive together (the CPU and memory views of one diagnosis) share a single sample.
+_sample_lock = threading.Lock()
+_sample = {"rows": None, "at": 0.0}
+SAMPLE_REUSE_SECONDS = 1.5
+
+
+def _process_sample():
+    with _sample_lock:
+        if _sample["rows"] is not None and time.monotonic() - _sample["at"] < SAMPLE_REUSE_SECONDS:
+            return _sample["rows"]
+        _sample["rows"] = _measure_processes()
+        _sample["at"] = time.monotonic()
+        return _sample["rows"]
+
+
+def _measure_processes():
+    # memory_percent is derived from the prefetched memory_info: asking psutil for both reads it twice.
+    processes = list(psutil.process_iter(["pid", "name", "memory_info"]))
+    total_memory = psutil.virtual_memory().total or 1
     for process in processes:
         try:
             process.cpu_percent(None)
@@ -141,14 +156,22 @@ def top_processes(sort_by="cpu", limit=8):
                 "pid": info["pid"],
                 "name": info.get("name") or "Unknown",
                 "cpu_percent": round(cpu, 1),
-                "memory_percent": round(info.get("memory_percent") or 0, 1),
+                "memory_percent": round(info["memory_info"].rss / total_memory * 100, 1) if info.get("memory_info") else 0.0,
                 "memory": human_size(info["memory_info"].rss) if info.get("memory_info") else "N/A",
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+    return rows
+
+
+@tool(
+    "top_processes",
+    "List the processes using the most CPU or memory right now (measured over one second).",
+    params={"sort_by": {"type": "string", "enum": ["cpu", "memory"], "description": "Sort by cpu or memory"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "How many processes (default 8)"}},
+)
+def top_processes(sort_by="cpu", limit=8):
     key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
-    rows.sort(key=lambda item: item[key], reverse=True)
-    rows = rows[:limit]
+    rows = sorted(_process_sample(), key=lambda item: item[key], reverse=True)[:limit]
     top = rows[0] if rows else None
     summary = f"Top by {sort_by}: " + ", ".join(f"{row['name']} (pid {row['pid']}) {row[key]}%" for row in rows[:3]) if top else "No processes readable"
     return {"ok": True, "summary": summary, "data": rows}

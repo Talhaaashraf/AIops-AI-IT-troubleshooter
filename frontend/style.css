@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Sentinel design system
+   AIops design system
    ========================================================================== */
 :root, :root[data-theme="dark"] {
   --bg: #0b1020;
@@ -418,3 +418,20 @@ select.field-input { cursor: pointer; }
   .enroll-row { flex-direction: column; }
   .enroll-step { padding-left: 22px; padding-top: 64px; }
 }
+
+/* Diagnosis speed selector + instant findings */
+.mode-toggle { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.mode-option { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.mode-option strong { font-size: .84rem; }
+.mode-option small { color: var(--muted); font-size: .72rem; }
+.mode-option:hover { background: var(--surface-2); }
+.mode-option.active { border-color: var(--accent); background: var(--accent-soft); }
+.mode-option:disabled { opacity: .45; cursor: not-allowed; }
+@media (max-width: 560px) { .mode-toggle { grid-template-columns: 1fr; } }
+.ts-findings { display: grid; gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; }
+.ts-findings li { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.ts-findings li .severity { grid-row: span 2; align-self: center; }
+.ts-findings li small { color: var(--muted); }
+.ts-step.findings .ts-step-icon { background: var(--accent); }
+.ts-timing { margin: -4px 0 12px; color: var(--muted); font-size: .76rem; }
+.rule-badge { padding: 2px 8px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }

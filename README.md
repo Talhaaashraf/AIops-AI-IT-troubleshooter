@@ -1,4 +1,4 @@
-# Sentinel — Agentic AI IT Troubleshooter
+# AIops — Agentic AI IT Troubleshooter
 
 A local, Wazuh-inspired device health monitor that also **diagnoses and fixes problems on its own**. You describe an issue ("internet is slow", "laptop keeps hanging"). An AI agent running on a **free local LLM (Ollama)** then:
 
@@ -24,7 +24,7 @@ Copy-Item .env.example .env
 2. Pull a model that supports tool calling:
 
    ```powershell
-   ollama pull qwen2.5:3b     # default: runs on most laptop CPUs, a diagnosis takes about 3 minutes
+   ollama pull qwen2.5:3b     # default: runs on most laptop CPUs, a fast diagnosis takes 25-60 seconds
    ollama pull qwen2.5:7b     # better reasoning; needs about 6 GB of free RAM
    ```
 
@@ -35,7 +35,7 @@ Copy-Item .env.example .env
    OLLAMA_MODEL=qwen2.5:3b
    ```
 
-On a CPU-only laptop, one diagnosis takes a few minutes, mostly LLM time. `qwen2.5:7b` gives better root-cause explanations, but if it times out, use `qwen2.5:3b`, close memory-heavy apps, or raise `OLLAMA_TIMEOUT_SECONDS`. To use Groq instead (cloud), set `LLM_PROVIDER=groq` and `GROQ_API_KEY`.
+On a CPU-only laptop, a **Fast AI** diagnosis takes 25-60 seconds and an **Instant** one takes 5-15 seconds without any AI (see the speed modes below). `qwen2.5:7b` gives better root-cause explanations, but if it times out, use `qwen2.5:3b`, close memory-heavy apps, or raise `OLLAMA_TIMEOUT_SECONDS`. To use Groq instead (cloud), set `LLM_PROVIDER=groq` and `GROQ_API_KEY`.
 
 Monitoring, alerts and the dashboard all work without any AI. Only troubleshooting, diagnosis and chat need it. The status of the AI is shown at the top of the **What's the issue?** tab and at `GET /api/ai/status`.
 
@@ -46,7 +46,7 @@ python models/migrate_model.py qwen2.5:3b   # once: copies the model into models
 docker compose up -d --build                # ollama + model-init + sentinel
 ```
 
-Open `http://localhost:8000`. Details: [docs/04-docker.md](docs/04-docker.md). The design notes and decisions for the whole project are in [docs/](docs/README.md), including the self-improving `sentinel-tech` model ([docs/05-self-improving-model.md](docs/05-self-improving-model.md)) and model licensing ([docs/06-models-and-licensing.md](docs/06-models-and-licensing.md)).
+Open `http://localhost:8000`, or your LAN IP when `SENTINEL_PUBLIC_URL` is set. With `OPEN_ENROLLMENT=true`, agents attach with just the install script and no token. Details: [docs/04-docker.md](docs/04-docker.md). The design notes and decisions for the whole project are in [docs/](docs/README.md), including the self-improving `sentinel-tech` model ([docs/05-self-improving-model.md](docs/05-self-improving-model.md)) and model licensing ([docs/06-models-and-licensing.md](docs/06-models-and-licensing.md)).
 
 ## Run
 
@@ -59,16 +59,27 @@ Open `http://127.0.0.1:8000`. To let remote devices connect, bind to your LAN ad
 ## What's the issue? — automated troubleshooting
 
 1. Open **What's the issue?** and pick the device: this server or any enrolled agent.
-2. Type the problem, or click a common one: slow PC, no internet, Wi-Fi drops, disk full, high CPU/RAM, printer, updates stuck, crashes/BSOD, battery, no sound, security check, or a full check-up.
-3. Click **Diagnose with AI**. The activity feed shows each step live:
-   - **Baseline:** `system_overview` plus the playbook's checks run immediately, so even a small model starts from real evidence.
-   - **Investigate:** the LLM calls more **read-only** diagnostics until it understands the problem (`AGENT_MAX_STEPS`, default 3).
+2. Type the problem, or click a common one: slow PC, no internet, Wi-Fi drops, disk full, high CPU/RAM, printer, updates stuck, crashes/BSOD, battery, no sound, security check, **hardware check**, **OS health**, or a full check-up.
+3. Pick a speed and click **Diagnose**. The activity feed shows each step live:
+   - **Baseline:** `system_overview` plus the playbook's checks run **in parallel** (CPU measurements first, so the other checks don't skew them). The AI model loads at the same time.
+   - **Instant findings:** rules turn the results into concrete problems within seconds, such as "Disk C: 96% full", "Memory 94% used, biggest users: chrome.exe, vmmemWSL", "DNS failing", "CPU throttled", "2 devices with driver problems" or "battery holds 48% of its capacity". They show up before the AI has written anything.
+   - **Investigate** (Deep AI only, or Fast AI when no playbook matches): the LLM calls more **read-only** diagnostics until it understands the problem (`AGENT_MAX_STEPS`, default 3).
    - **Report:** root cause, confidence, evidence, proposed fixes and manual steps.
 4. Each proposed fix has an **Apply fix** button with a risk badge (low / medium / high) and a confirmation step. After a fix runs, the agent re-runs the checks and marks the session **Resolved** or **Not resolved**.
 
-Diagnostic tools (read-only): system overview, top processes, cleanup candidates, startup programs, internet connectivity (gateway, DNS, TCP, HTTP and captive-portal checks), ping, DNS lookup, Wi-Fi status, security posture, grouped event-log errors, recent crashes/BSODs, service status, failed services, update status, battery health, disk SMART health, printer status, performance benchmark.
+### Speed modes
 
-Fix tools: clear temp files, empty recycle bin, clear the Windows Update cache, flush DNS, renew IP, reset network stack (Windows), restart an allow-listed service, kill a process (PID + exact name), disable/restore a startup item (Windows), clear the print queue, trigger an update scan, sync time, SFC and DISM repair (Windows).
+| Mode | What runs | Typical time on a laptop CPU |
+| --- | --- | --- |
+| **Instant** | Parallel checks + rules. No AI; also used automatically when the AI is offline or does not answer. | 5-15 s |
+| **Fast AI** (default, `DIAGNOSIS_MODE=fast`) | Checks + rules + one short AI report. | 25-60 s |
+| **Deep AI** | The AI may run extra checks before reporting. | 1-4 min |
+
+Fixes are verified by rules when possible: if the fix targeted a finding, AIops re-runs that check and confirms the finding is gone, with no AI call. The report shows how long the checks and the AI took.
+
+Diagnostic tools (read-only): system overview, top processes, **hardware health** (CPU model and throttling, temperatures, fans, RAM modules, GPU/driver status, Device Manager errors, WHEA/MCE hardware errors), cleanup candidates, startup programs, internet connectivity (gateway, DNS, TCP, HTTP and captive-portal checks), ping, DNS lookup, Wi-Fi status, security posture, grouped event-log errors, recent crashes/BSODs, service status, failed services, update status, battery health, disk SMART health, printer status, performance benchmark.
+
+Fix tools: rescan hardware (Windows), clear temp files, empty recycle bin, clear the Windows Update cache, flush DNS, renew IP, reset network stack (Windows), restart an allow-listed service, kill a process (PID + exact name), disable/restore a startup item (Windows), clear the print queue, trigger an update scan, sync time, SFC and DISM repair (Windows).
 
 All tools live in one shared, allow-listed registry, [agent/toolkit/](agent/toolkit/), used by both the server and the agents.
 
@@ -134,9 +145,10 @@ Set `"allow_remediation": false` to allow diagnostics only, or set `"max_risk": 
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Model; use `qwen2.5:7b` when RAM allows |
 | `OLLAMA_NUM_CTX` | `8192` | Context window |
 | `OLLAMA_TIMEOUT_SECONDS` | `600` | Per-call timeout |
-| `OLLAMA_KEEP_ALIVE` | `10m` | How long the model stays in RAM |
+| `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM (reloading costs 10-30 s) |
 | `GROQ_API_KEY`, `GROQ_MODEL` | — | Optional cloud fallback |
-| `AGENT_MAX_STEPS` | `3` | Extra AI investigation rounds after the baseline |
+| `DIAGNOSIS_MODE` | `fast` | Default speed: `instant`, `fast` or `deep` |
+| `AGENT_MAX_STEPS` | `3` | Extra AI investigation rounds in deep mode |
 | `AUTO_FIX_MAX_RISK` | `none` | Auto-apply fixes up to `low` / `medium` / `high` |
 | `ADMIN_API_KEY` | — | Required to generate enrollment tokens |
 | `DASHBOARD_PASSWORD` | — | Enables the dashboard login |

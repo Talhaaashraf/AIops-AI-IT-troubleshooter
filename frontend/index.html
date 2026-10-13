@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sentinel · AI IT Troubleshooter</title>
+  <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script>
@@ -32,7 +32,7 @@
       <div class="brand">
         <span class="brand-mark"><svg><use href="#i-shield"/></svg></span>
         <div>
-          <strong>Sentinel</strong>
+          <strong>AIops</strong>
           <small>AI IT TROUBLESHOOTER</small>
         </div>
       </div>
@@ -87,7 +87,7 @@
           <div>
             <p class="kicker">Live monitor</p>
             <h1>System overview</h1>
-            <p class="subheading">Real-time signals from the Sentinel server. Remote devices are listed under Agents.</p>
+            <p class="subheading">Real-time signals from the AIops server. Remote devices are listed under Agents.</p>
           </div>
           <button class="primary-button" data-goto="troubleshoot"><svg><use href="#i-spark"/></svg>Something wrong? Diagnose</button>
         </header>
@@ -162,8 +162,14 @@
             <textarea id="ts-issue" class="field-input" rows="3" maxlength="1000" placeholder="e.g. Internet is very slow since this morning / the laptop hangs whenever Chrome is open"></textarea>
             <p class="field-label">Or pick a common problem</p>
             <div id="ts-playbooks" class="playbook-grid"></div>
+            <p class="field-label">Speed</p>
+            <div id="ts-mode" class="mode-toggle" role="radiogroup" aria-label="Diagnosis speed">
+              <button type="button" class="mode-option" data-mode="instant" role="radio" aria-checked="false"><strong>Instant</strong><small>Rule checks only, seconds</small></button>
+              <button type="button" class="mode-option active" data-mode="fast" role="radio" aria-checked="true"><strong>Fast AI</strong><small>Checks + one AI pass</small></button>
+              <button type="button" class="mode-option" data-mode="deep" role="radio" aria-checked="false"><strong>Deep AI</strong><small>AI investigates further</small></button>
+            </div>
             <div class="ts-actions">
-              <button id="ts-start" class="primary-button"><svg><use href="#i-spark"/></svg>Diagnose with AI</button>
+              <button id="ts-start" class="primary-button"><svg><use href="#i-spark"/></svg>Diagnose</button>
               <span id="ts-form-status" class="soft-label"></span>
             </div>
           </section>
@@ -395,7 +401,7 @@
           <div>
             <p class="kicker">Fleet · one-line enrollment</p>
             <h1>Add an agent</h1>
-            <p class="subheading">Run one command on any Windows, Linux or macOS machine. It installs the Sentinel agent as a background service, connects it to this server, and lets the AI diagnose and fix it remotely.</p>
+            <p class="subheading">Run one command on any Windows, Linux or macOS machine. It installs the AIops agent as a background service, connects it to this server, and lets the AI diagnose and fix it remotely.</p>
           </div>
         </header>
 
@@ -408,7 +414,7 @@
             <p id="enroll-server-warning" class="enroll-warning hidden">This address only works on this computer. To add other devices, enter this machine's LAN IP, e.g. <code>http://192.168.1.20:8000</code>. Installing the agent on this same laptop works as is.</p>
           </section>
 
-          <section class="panel enroll-step">
+          <section id="enroll-token-step" class="panel enroll-step">
             <span class="step-number">2</span>
             <h2>Enrollment token</h2>
             <p class="modal-copy">A one-time token, valid for 24 hours, that lets one device register.</p>
@@ -420,7 +426,7 @@
           </section>
 
           <section class="panel enroll-step">
-            <span class="step-number">3</span>
+            <span id="enroll-run-number" class="step-number">3</span>
             <h2>Run on the device</h2>
             <div class="platform-tabs">
               <button data-platform="windows" class="platform-tab active">Windows</button>

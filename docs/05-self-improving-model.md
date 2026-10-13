@@ -1,6 +1,6 @@
 # The self-improving model (`sentinel-tech`)
 
-Sentinel learns from every ticket it works on.
+AIops learns from every ticket it works on.
 
 ## Learning loop
 
