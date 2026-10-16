@@ -1,14 +1,15 @@
-"""Build the self-improving `sentinel-tech` model from what the agent has learned.
+"""Build the `aiops-brain` model: the AIops principles plus what the agent has learned.
 
-Each rebuild distills trusted cases (verified-resolved or operator-confirmed)
-into lessons and worked examples, writes them to models/sentinel-tech/
-(Modelfile, knowledge.json, training_data.jsonl) and creates the model in
-Ollama on top of the base model. This is knowledge distillation into the
-prompt (system lessons + few-shot examples), not weight fine-tuning;
-training_data.jsonl is exported so the same cases can be used for a real
-LoRA fine-tune on a GPU later.
+The brain is created at startup on top of the selected base model (and again whenever the base model or
+the principles change), so it always carries the AIops behaviour: best effort, suggest-only, 3-4 ranked
+solutions. Each rebuild also distills trusted cases (verified-resolved or operator-confirmed) into
+lessons and worked examples, written to models/aiops-brain/ (Modelfile, knowledge.json,
+training_data.jsonl). This is "training" by system prompt and few-shot examples, not weight
+fine-tuning; training_data.jsonl is exported so the same cases can be used for a real LoRA fine-tune
+on a GPU later.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -18,27 +19,34 @@ from datetime import datetime, timezone
 import httpx
 
 from ..config import MODELS_DIR
+from ..llm.brain import BRAIN_PRINCIPLES
+from ..llm.catalog import selected_model
 from . import store
 
 logger = logging.getLogger(__name__)
 
-LEARNED_DIR = MODELS_DIR / "sentinel-tech"
+LEARNED_DIR = MODELS_DIR / "aiops-brain"
 VERSION_FILE = LEARNED_DIR / "version.json"
 MAX_LESSONS = 25
 MAX_EXAMPLES = 3
 _build_lock = threading.Lock()
 
-BASE_SYSTEM = """You are AIops, a senior IT support technician for Windows, macOS and Linux.
+BASE_SYSTEM = """You are AIops, a senior IT support technician for Windows, macOS and Linux PCs (software and hardware).
 You diagnose problems from real diagnostic evidence, explain root causes in plain language,
-and recommend safe, specific fixes. Never invent numbers or facts that are not in the evidence."""
+and recommend safe, specific fixes. """ + BRAIN_PRINCIPLES
+
+
+def system_fingerprint():
+    """Changes when the principles change, so the brain is rebuilt to match."""
+    return hashlib.sha256(BASE_SYSTEM.encode("utf-8")).hexdigest()[:12]
 
 
 def learned_model_name():
-    return os.getenv("LEARNED_MODEL_NAME", "sentinel-tech")
+    return os.getenv("LEARNED_MODEL_NAME", "aiops-brain")
 
 
 def base_model_name():
-    return os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+    return selected_model()
 
 
 def rebuild_every():
@@ -120,7 +128,7 @@ def export_training_data(cases):
 
 
 def build(reason="manual"):
-    """Regenerate models/sentinel-tech and (re)create it in Ollama. Returns the new version info."""
+    """Regenerate models/aiops-brain and (re)create it in Ollama. Returns the new version info."""
     with _build_lock:
         cases = store.list_cases(5000)
         trusted = [case for case in cases if store.is_trusted(case)]
@@ -153,6 +161,7 @@ def build(reason="manual"):
             "version": version,
             "model": learned_model_name(),
             "base_model": base,
+            "system_fingerprint": system_fingerprint(),
             "trusted_cases": len(trusted),
             "lessons": len(learned),
             "examples": len(examples),
@@ -163,6 +172,30 @@ def build(reason="manual"):
         }
         VERSION_FILE.write_text(json.dumps(info, indent=2), encoding="utf-8")
         return info
+
+
+def _installed_models(host):
+    try:
+        response = httpx.get(f"{host}/api/tags", timeout=5)
+        response.raise_for_status()
+        return {item.get("name", "") for item in response.json().get("models", [])}
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def ensure_brain(reason="startup"):
+    """Create or refresh aiops-brain when it is missing, built on another base model, or built with older
+    principles. Returns the build info when it built, else None. Safe to call at every startup."""
+    host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    installed = _installed_models(host)
+    if installed is None:
+        return None  # Ollama not reachable yet; the next startup or model switch tries again
+    info = version_info()
+    name = learned_model_name()
+    present = name in installed or f"{name}:latest" in installed
+    if present and info.get("base_model") == base_model_name() and info.get("system_fingerprint") == system_fingerprint():
+        return None
+    return build(reason=reason)
 
 
 def maybe_rebuild():

@@ -15,7 +15,7 @@ echo "[AIops] Installing agent to $INSTALL_DIR (server: $SERVER)"
 mkdir -p "$INSTALL_DIR"
 launchctl bootout system "$PLIST" 2>/dev/null || true
 
-if curl -fsSL "$SERVER/api/agents/binary/mac?token=$TOKEN" -o "$INSTALL_DIR/SentinelAgent.download" 2>/dev/null; then
+if curl -fsSL -H "ngrok-skip-browser-warning: 1" "$SERVER/api/agents/binary/mac?token=$TOKEN" -o "$INSTALL_DIR/SentinelAgent.download" 2>/dev/null; then
   mv "$INSTALL_DIR/SentinelAgent.download" "$INSTALL_DIR/SentinelAgent"
   chmod 755 "$INSTALL_DIR/SentinelAgent"
   xattr -d com.apple.quarantine "$INSTALL_DIR/SentinelAgent" 2>/dev/null || true
@@ -32,7 +32,7 @@ else
   AGENT_DIR="$INSTALL_DIR/app"
   mkdir -p "$AGENT_DIR"
   TMP_ZIP="$(mktemp)"
-  curl -fsSL "$SERVER/api/agents/bundle?token=$TOKEN" -o "$TMP_ZIP"
+  curl -fsSL -H "ngrok-skip-browser-warning: 1" "$SERVER/api/agents/bundle?token=$TOKEN" -o "$TMP_ZIP"
   /usr/bin/python3 -m zipfile -e "$TMP_ZIP" "$AGENT_DIR"
   rm -f "$TMP_ZIP"
   "$INSTALL_DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade psutil requests
@@ -76,4 +76,4 @@ chmod 644 "$PLIST"
 launchctl bootstrap system "$PLIST"
 echo "[AIops] Agent installed ($MODE mode) and running. It will appear in the dashboard within a few seconds."
 echo "[AIops] Logs: $AGENT_DIR/agent_log.txt"
-echo "[AIops] Uninstall: curl -fsSL '$SERVER/install/uninstall-macos.sh' | sudo bash"
+echo "[AIops] Uninstall: curl -fsSL -H 'ngrok-skip-browser-warning: 1' '$SERVER/install/uninstall-macos.sh' | sudo bash"

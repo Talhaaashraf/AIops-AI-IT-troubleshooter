@@ -9,6 +9,8 @@ $Server = '__SERVER_URL__'
 $Token = '__TOKEN__'
 $InstallDir = Join-Path $env:ProgramData 'SentinelAgent'
 $TaskName = 'Sentinel Agent'
+# ngrok's free plan shows a browser warning page unless this header is sent.
+$Headers = @{ 'ngrok-skip-browser-warning' = '1' }
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -26,7 +28,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 $exe = Join-Path $InstallDir 'SentinelAgent.exe'
 $mode = 'python'
 try {
-  Invoke-WebRequest -UseBasicParsing -Uri "$Server/api/agents/binary/windows?token=$Token" -OutFile $exe
+  Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$Server/api/agents/binary/windows?token=$Token" -OutFile $exe
   if (-not (Test-Path $exe)) { throw 'The agent binary was removed right after download (antivirus?).' }
   $mode = 'binary'
   $AgentDir = $InstallDir
@@ -73,7 +75,7 @@ if ($mode -eq 'python') {
 
   $AgentDir = Join-Path $InstallDir 'app'
   $zip = Join-Path $env:TEMP 'sentinel-agent.zip'
-  Invoke-WebRequest -UseBasicParsing -Uri "$Server/api/agents/bundle?token=$Token" -OutFile $zip
+  Invoke-WebRequest -UseBasicParsing -Headers $Headers -Uri "$Server/api/agents/bundle?token=$Token" -OutFile $zip
   New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
   Expand-Archive -Path $zip -DestinationPath $AgentDir -Force
   Remove-Item $zip -Force
@@ -142,7 +144,7 @@ if ($connected -or $registered) {
   Write-Host "[AIops] The agent did not connect. Task state: $((Get-ScheduledTask -TaskName $TaskName).State), last result: $($info.LastTaskResult)" -ForegroundColor Red
   if (Test-Path $logPath) { Get-Content $logPath -Tail 8 | ForEach-Object { Write-Host "    $_" } }
   else { Write-Host '    No agent_log.txt was written: the agent process could not start.' }
-  Write-Host "    Check that $Server opens from this machine and that port 8000 is reachable."
+  Write-Host "    Check that $Server opens in a browser on this machine (the server's port must be reachable)."
 }
 Write-Host "[AIops] Log file: $logPath"
-Write-Host "[AIops] Uninstall: irm '$Server/install/uninstall-windows.ps1' | iex"
+Write-Host "[AIops] Uninstall: irm -Headers @{'ngrok-skip-browser-warning'='1'} '$Server/install/uninstall-windows.ps1' | iex"

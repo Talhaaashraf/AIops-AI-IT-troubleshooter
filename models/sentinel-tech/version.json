@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "model": "sentinel-tech",
+  "base_model": "qwen3:4b",
+  "trusted_cases": 0,
+  "lessons": 0,
+  "examples": 0,
+  "built_at": "2026-10-15T13:15:15.792023+00:00",
+  "reason": "manual",
+  "created_in_ollama": true,
+  "error": null
+}

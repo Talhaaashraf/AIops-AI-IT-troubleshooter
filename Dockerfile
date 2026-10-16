@@ -29,4 +29,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # One worker on purpose: live session events and agent task wake-ups are in-process.
 # uvloop + httptools (from uvicorn[standard]) make the async server faster.
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop", "--http", "httptools", "--no-access-log"]
+# --proxy-headers: behind nginx/ngrok, take the client address and https scheme from X-Forwarded-*.
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop", "--http", "httptools", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]

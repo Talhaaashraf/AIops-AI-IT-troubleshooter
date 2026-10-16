@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import uuid
@@ -53,7 +54,7 @@ def _connect():
     """)
 
     columns = {row[1] for row in connection.execute("PRAGMA table_info(devices)").fetchall()}
-    for column, definition in (("agent_token_hash", "TEXT"), ("token_expires_at", "TEXT")):
+    for column, definition in (("agent_token_hash", "TEXT"), ("token_expires_at", "TEXT"), ("onboarding_session_id", "TEXT")):
         if column not in columns:
             connection.execute(f"ALTER TABLE devices ADD COLUMN {column} {definition}")
 
@@ -90,9 +91,23 @@ def create_pending_token(hours=24):
 MIN_SELF_TOKEN_LENGTH = 24
 
 
+DEVICE_ID_PATTERN = re.compile(r"^agent-[0-9a-f]{12}$")
+KNOWN_OS = {"Windows", "Linux", "Darwin"}
+
+
+def clean_label(value, limit=100):
+    """Hostnames and nicknames come from the device: keep printable text without markup characters."""
+    text = "".join(char for char in str(value or "") if char.isprintable() and char not in '<>"\'`')
+    return " ".join(text.split())[:limit]
+
+
 def register_device(token, hostname, os_type, nickname="", device_id=None, allow_open=False):
     """Claim a pending enrollment token, re-register a known device, or (open enrollment)
     enroll a new device with a secret it generated itself."""
+    hostname, nickname = clean_label(hostname) or "Unknown", clean_label(nickname)
+    os_type = os_type if os_type in KNOWN_OS else "Unknown"
+    # The server names devices; a client-chosen id ("tasks", "report1", ...) could collide with routes.
+    device_id = device_id if isinstance(device_id, str) and DEVICE_ID_PATTERN.match(device_id) else None
     token_hash = hash_token(token)
     now = utc_now()
     with _connect() as connection:
@@ -153,10 +168,27 @@ def get_device_by_token(token):
         return dict(row)
 
 
+def claim_onboarding(device_id, session_id):
+    """Record the onboarding check for a device once; False if it already has one (or another request won)."""
+    with _connect() as connection:
+        changed = connection.execute(
+            "UPDATE devices SET onboarding_session_id = ? WHERE device_id = ? AND onboarding_session_id IS NULL",
+            (session_id, device_id),
+        ).rowcount
+        connection.commit()
+        return changed == 1
+
+
+def set_onboarding_session(device_id, session_id):
+    with _connect() as connection:
+        connection.execute("UPDATE devices SET onboarding_session_id = ? WHERE device_id = ?", (session_id, device_id))
+        connection.commit()
+
+
 def get_device(device_id):
     with _connect() as connection:
         row = connection.execute(
-            "SELECT device_id, nickname, hostname, os_type, first_seen, last_seen, status FROM devices WHERE device_id = ?", (device_id,)
+            "SELECT device_id, nickname, hostname, os_type, first_seen, last_seen, status, onboarding_session_id FROM devices WHERE device_id = ?", (device_id,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -233,6 +265,6 @@ def list_devices():
     mark_offline_devices()
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT device_id, nickname, hostname, os_type, first_seen, last_seen, status, token_expires_at FROM devices ORDER BY nickname"
+            "SELECT device_id, nickname, hostname, os_type, first_seen, last_seen, status, token_expires_at, onboarding_session_id FROM devices ORDER BY nickname"
         ).fetchall()
         return [dict(row) for row in rows]

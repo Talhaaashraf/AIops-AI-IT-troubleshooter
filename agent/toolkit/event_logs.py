@@ -13,15 +13,18 @@ import subprocess
 LOOKBACK_HOURS = 24
 MAX_EVENTS = 50
 MESSAGE_MAX_CHARS = 300
-TIMEOUT_SECONDS = 15
+# Rendering 50 event messages takes PowerShell well over 15 s as SYSTEM on a busy laptop.
+TIMEOUT_SECONDS = 45
 
 
 def _run(command, timeout=TIMEOUT_SECONDS):
+    """stdout text, or None when the command failed or timed out. A failure must never read as
+    "no events": that would hide real errors from every diagnosis."""
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, errors="replace")
         return result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
 
 
 def _truncate(message):
@@ -39,6 +42,8 @@ def _collect_windows():
         "| ConvertTo-Json -Compress"
     )
     output = _run(["powershell", "-NoProfile", "-Command", script])
+    if output is None:
+        return {"available": False, "events": [], "detail": f"Reading Windows Event Viewer timed out after {TIMEOUT_SECONDS}s; it is retried on the next check"}
     if not output:
         return {"available": True, "events": [], "detail": f"No warning, error, or critical events in the last {LOOKBACK_HOURS} hours"}
 

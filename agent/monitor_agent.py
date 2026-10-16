@@ -17,11 +17,13 @@ import requests
 try:
     from toolkit import TOOLKIT_VERSION, get_tool, risk_rank, run_tool
     from toolkit.event_logs import collect_event_log_report
+    from toolkit.leftovers import purge_expired
     from toolkit.performance_checks import collect_performance_report
     from toolkit.security_checks import collect_security_report
 except ImportError:
     from .toolkit import TOOLKIT_VERSION, get_tool, risk_rank, run_tool
     from .toolkit.event_logs import collect_event_log_report
+    from .toolkit.leftovers import purge_expired
     from .toolkit.performance_checks import collect_performance_report
     from .toolkit.security_checks import collect_security_report
 
@@ -60,10 +62,16 @@ def get_event_logs():
     now = time.time()
     if _event_log_cache["data"] is None or now - _event_log_cache["checked_at"] > EVENT_LOG_REFRESH_SECONDS:
         try:
-            _event_log_cache["data"] = collect_event_log_report()
+            fresh = collect_event_log_report()
         except Exception:
             logging.exception("Event log check failed")
-            _event_log_cache["data"] = _event_log_cache["data"] or {}
+            fresh = {}
+        previous = _event_log_cache["data"] or {}
+        # A failed read (timeout on a busy machine) keeps the last good result instead of replacing it.
+        if fresh.get("available") or not previous.get("available"):
+            _event_log_cache["data"] = fresh
+        else:
+            logging.warning("Event log check failed (%s); keeping the previous result", fresh.get("detail"))
         _event_log_cache["checked_at"] = now
     return _event_log_cache["data"]
 
@@ -124,10 +132,31 @@ def collect_report(config):
     for process in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
         try:
             info = process.info
+            if info["pid"] == 0 or (info.get("name") or "").lower() in IDLE_PROCESS_NAMES:
+                continue  # idle capacity, not a process using the CPU
             processes.append({"pid": info["pid"], "name": info.get("name") or "Unknown", "cpu_percent": round(info.get("cpu_percent") or 0, 2), "memory_percent": round(info.get("memory_percent") or 0, 2)})
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    return {"system": {"os_name": platform.system(), "os_version": platform.version(), "os_release": platform.release(), "architecture": platform.machine(), "processor": platform.processor() or "Unknown", "hostname": socket.gethostname()}, "cpu": {"physical_cores": psutil.cpu_count(logical=False), "logical_cores": psutil.cpu_count(logical=True), "max_frequency_mhz": frequency.max if frequency else None, "current_frequency_mhz": frequency.current if frequency else None, "per_core_usage_percent": per_core, "total_usage_percent": psutil.cpu_percent(interval=None)}, "memory": {"ram": {"total": human_size(memory.total), "available": human_size(memory.available), "used": human_size(memory.used), "usage_percent": memory.percent}, "swap": {"total": human_size(swap.total), "used": human_size(swap.used), "usage_percent": swap.percent}}, "disk": disks, "network": {"bytes_sent": human_size(psutil.net_io_counters().bytes_sent), "bytes_received": human_size(psutil.net_io_counters().bytes_recv), "interfaces": interfaces}, "battery": battery, "processes_count": len(processes), "top_processes": {"top_by_cpu": sorted(processes, key=lambda item: item["cpu_percent"], reverse=True)[:5], "top_by_memory": sorted(processes, key=lambda item: item["memory_percent"], reverse=True)[:5]}, "security": get_security(), "performance": get_performance(config), "event_logs": get_event_logs()}
+    return {"system": {"os_name": platform.system(), "os_version": platform.version(), "os_release": platform.release(), "architecture": platform.machine(), "processor": processor_name(), "hostname": socket.gethostname()}, "cpu": {"physical_cores": psutil.cpu_count(logical=False), "logical_cores": psutil.cpu_count(logical=True), "max_frequency_mhz": frequency.max if frequency else None, "current_frequency_mhz": frequency.current if frequency else None, "per_core_usage_percent": per_core, "total_usage_percent": psutil.cpu_percent(interval=None)}, "memory": {"ram": {"total": human_size(memory.total), "available": human_size(memory.available), "used": human_size(memory.used), "usage_percent": memory.percent}, "swap": {"total": human_size(swap.total), "used": human_size(swap.used), "usage_percent": swap.percent}}, "disk": disks, "network": {"bytes_sent": human_size(psutil.net_io_counters().bytes_sent), "bytes_received": human_size(psutil.net_io_counters().bytes_recv), "interfaces": interfaces}, "battery": battery, "processes_count": len(processes), "top_processes": {"top_by_cpu": sorted(processes, key=lambda item: item["cpu_percent"], reverse=True)[:5], "top_by_memory": sorted(processes, key=lambda item: item["memory_percent"], reverse=True)[:5]}, "security": get_security(), "performance": get_performance(config), "event_logs": get_event_logs()}
+
+
+IDLE_PROCESS_NAMES = {"system idle process", "idle"}
+# Leftovers moved to quarantine can be restored for 7 days; expired batches are deleted once a day.
+QUARANTINE_PURGE_SECONDS = 86400
+
+
+def processor_name():
+    """The marketing name (e.g. "12th Gen Intel(R) Core(TM) i5-1235U"); platform.processor()
+    only gives "Intel64 Family 6 Model 154" on Windows."""
+    if platform.system() == "Windows":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+        except OSError:
+            pass
+    return platform.processor() or "Unknown"
 
 
 def load_config():
@@ -148,7 +177,16 @@ def save_config(config):
         json.dump(config, config_file, indent=2)
 
 
+# ngrok's free plan answers browser-like requests with a warning page; this header skips it.
+DEFAULT_HEADERS = {"ngrok-skip-browser-warning": "1", "User-Agent": f"AIops-Agent/{TOOLKIT_VERSION}"}
+
+
+def _headers(extra=None):
+    return {**DEFAULT_HEADERS, **(extra or {})}
+
+
 def request_with_retry(method, url, **kwargs):
+    kwargs["headers"] = _headers(kwargs.get("headers"))
     delay = 1
     while True:
         try:
@@ -213,7 +251,7 @@ def _run_task(config, base, headers, task, slots):
 def task_worker(config, device_id):
     """Long-poll the server for diagnose/fix tasks (outbound only, works behind NAT)."""
     base = config["server_url"].rstrip("/")
-    headers = {"Authorization": "Bearer " + config["AGENT_TOKEN"]}
+    headers = _headers({"Authorization": "Bearer " + config["AGENT_TOKEN"]})
     diagnostics = ThreadPoolExecutor(MAX_PARALLEL_DIAGNOSTICS, thread_name_prefix="sentinel-diag")
     fixes = ThreadPoolExecutor(1, thread_name_prefix="sentinel-fix")
     slots = threading.BoundedSemaphore(MAX_PARALLEL_DIAGNOSTICS)
@@ -250,7 +288,16 @@ def run():
     previous = None
     interval = max(2, int(config.get("interval_seconds", DEFAULT_INTERVAL)))
     logging.info("Agent %s started for device %s", config.get("nickname", socket.gethostname()), device_id)
+    last_purge = 0.0
     while True:
+        if time.time() - last_purge > QUARANTINE_PURGE_SECONDS:
+            last_purge = time.time()
+            try:
+                removed = purge_expired()
+                if removed:
+                    logging.info("Purged expired quarantine batches: %s", ", ".join(removed))
+            except Exception:  # cleanup must never stop health reporting
+                logging.exception("Quarantine purge failed")
         report = collect_report(config)
         cpu_before = (previous or {}).get("cpu", {}).get("total_usage_percent", 0)
         ram_before = (previous or {}).get("memory", {}).get("ram", {}).get("usage_percent", 0)

@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "model": "aiops-brain",
+  "base_model": "qwen3:4b",
+  "system_fingerprint": "08648c64d201",
+  "trusted_cases": 0,
+  "lessons": 0,
+  "examples": 0,
+  "built_at": "2026-10-15T16:23:42.779436+00:00",
+  "reason": "manual",
+  "created_in_ollama": true,
+  "error": null
+}

@@ -89,6 +89,9 @@ def _top_processes(data, summary, args, os_type):
 def _check_internet(data, summary, args, os_type):
     stages = data or {}
     gateway_ping = stages.get("gateway_ping") or {}
+    online = all((stages.get(stage) or {}).get("ok") for stage in ("dns_resolution", "tcp_to_internet", "http"))
+    if online:
+        return _speed_findings(stages, gateway_ping)
     if not stages.get("adapters_with_ip"):
         return [_finding("net_no_adapter", "critical", "No network connection", "No network adapter has an IP address: cable unplugged, Wi-Fi off or adapter disabled.", "check_internet")]
     if not stages.get("default_gateway"):
@@ -101,6 +104,10 @@ def _check_internet(data, summary, args, os_type):
         return [_finding("net_dns", "high", "DNS is failing", "Websites cannot be found by name although the internet is reachable.", "check_internet", [_fix("flush_dns", "clears the broken DNS cache")])]
     if not (stages.get("http") or {}).get("ok"):
         return [_finding("net_http", "medium", "Web traffic is blocked", "A proxy, captive portal (hotel/guest Wi-Fi login) or web filter is interfering.", "check_internet")]
+    return _speed_findings(stages, gateway_ping)
+
+
+def _speed_findings(stages, gateway_ping):
     found = []
     dns_ms = (stages.get("dns_resolution") or {}).get("ms") or 0
     tcp_ms = (stages.get("tcp_to_internet") or {}).get("ms") or 0
@@ -135,7 +142,8 @@ def _security_posture(data, summary, args, os_type):
         found.append(_finding("sec_no_encryption", "low", "Disk is not encrypted", "Data is readable if the laptop is lost or stolen.", "security_posture"))
     risky = (data.get("listening_ports") or {}).get("risky_exposed") or []
     if risky:
-        ports = ", ".join(str(port.get("port")) for port in risky[:5])
+        # One port can listen on several addresses (0.0.0.0 and ::); name each port once.
+        ports = ", ".join(dict.fromkeys(str(port.get("port")) for port in risky))
         found.append(_finding("sec_risky_ports", "medium", f"Risky ports exposed to the network ({ports})", "Services like RDP/SMB/Telnet listening on all interfaces are common attack targets.", "security_posture"))
     return found
 
@@ -266,7 +274,65 @@ def _hardware_health(data, summary, args, os_type):
     return found
 
 
+def _boot_performance(data, summary, args, os_type):
+    data = data or {}
+    found = []
+    # Windows' total boot time includes the settle-down after sign-in (often 20-60 s on a healthy PC), so it
+    # judges the time until the desktop is ready; elsewhere only the total is known, with a higher bar.
+    desktop = data.get("desktop_ready_seconds")
+    seconds, limit = (desktop, 60) if desktop else (data.get("last_boot_seconds"), 90)
+    if seconds and seconds >= limit:
+        culprits = ", ".join(item["name"] for item in (data.get("slowed_by") or [])[:3])
+        what = f"the desktop was ready after {seconds:.0f} s" if desktop else f"the last boot took {seconds:.0f} s"
+        found.append(_finding("boot_slow", "high" if seconds >= 2 * limit else "medium", f"Start-up is slow: {what}",
+                              (f"Slowed down in the last 30 days by {culprits}. " if culprits else "") + "Fewer startup programs and an SSD make it faster.", "boot_performance"))
+    if (data.get("startup_programs") or 0) >= 15:
+        found.append(_finding("startup_many", "low", f"{data['startup_programs']} programs start automatically", "Many startup programs slow down boot and use memory in the background.", "boot_performance"))
+    return found
+
+
+def _os_updates(data, summary, args, os_type):
+    data = data or {}
+    found = []
+    security = data.get("security_count") or 0
+    if security:
+        # Medium, not high: right after the monthly patch day nearly every PC has a few waiting for a while.
+        found.append(_finding("os_updates_security", "medium", f"{security} security update(s) are waiting to be installed",
+                              "Security updates close holes attackers use; install them from the Performance tab or the system's updater.", "os_updates"))
+    elif (data.get("count") or 0) - (data.get("driver_count") or 0) > 0:
+        found.append(_finding("os_updates_waiting", "low", f"{data['count']} system update(s) waiting", summary, "os_updates"))
+    if data.get("reboot_pending"):
+        found.append(_finding("reboot_pending", "medium", "A restart is pending to finish updates", "Updates stay half-installed until the computer restarts.", "os_updates"))
+    return found
+
+
+def _input_devices(data, summary, args, os_type):
+    data = data or {}
+    found = []
+    for device in [item for item in data.get("devices") or [] if item.get("status") == "problem"][:3]:
+        found.append(_finding(f"input_device:{device.get('name')}", "medium", f"{str(device.get('kind', 'input device')).capitalize()} driver problem: {device.get('name')}",
+                              f"Windows reports: {device.get('problem')}. Re-plug it, or update/reinstall its driver.", "input_devices",
+                              [_fix("rescan_hardware", "re-detects the device and reloads its driver")] if os_type == "Windows" else []))
+    # Servers, VMs and containers have no input devices at all; only a touchpad or mouse without any
+    # keyboard points to a keyboard (or its driver) that stopped working.
+    if data.get("pointing") and not data.get("keyboards"):
+        found.append(_finding("input_no_keyboard", "medium", "No working keyboard detected", "Check the cable or receiver, or the keyboard's battery.", "input_devices"))
+    return found
+
+
+def _performance_benchmark(data, summary, args, os_type):
+    disk = (data or {}).get("disk") or {}
+    write = disk.get("write_mbps")
+    if disk.get("available") and write is not None and write < 15:
+        return [_finding("disk_slow", "medium", f"The disk is slow: it writes only {write} MB/s", "An old hard disk, a nearly full disk or heavy background disk use makes everything slow; an SSD helps most.", "performance_benchmark")]
+    return []
+
+
 RULES = {
+    "boot_performance": _boot_performance,
+    "os_updates": _os_updates,
+    "input_devices": _input_devices,
+    "performance_benchmark": _performance_benchmark,
     "system_overview": _system_overview,
     "top_processes": _top_processes,
     "check_internet": _check_internet,

@@ -28,16 +28,17 @@ KERNEL_HARDWARE_PATTERN = re.compile(r"hardware error|mce:|machine check|i/o err
 
 WINDOWS_SCRIPT = r"""
 $ErrorActionPreference = 'SilentlyContinue'
-$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, NumberOfCores, NumberOfLogicalProcessors, LoadPercentage, CurrentClockSpeed, MaxClockSpeed
-# Get-Counter is ~1 s; the equivalent Win32_PerfFormatted* WMI class can take a minute on first use.
+# CPU name and model come from the registry in Python: Win32_Processor computes LoadPercentage
+# and takes seconds, enough to push the whole script past its timeout on a busy laptop.
+# -Property limits each WMI query to the fields used, which keeps them cheap.
+# Get-Counter is ~1-3 s; the equivalent Win32_PerfFormatted* WMI class can take a minute on first use.
 $perf = [math]::Round((Get-Counter '\Processor Information(_Total)\% Processor Performance').CounterSamples[0].CookedValue)
-$mem = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [pscustomobject]@{ gb = [math]::Round($_.Capacity / 1GB, 1); mhz = $_.ConfiguredClockSpeed; maker = "$($_.Manufacturer)".Trim(); slot = $_.DeviceLocator } })
-$gpu = @(Get-CimInstance Win32_VideoController | ForEach-Object { [pscustomobject]@{ name = $_.Name; driver = $_.DriverVersion; status = $_.Status; code = $_.ConfigManagerErrorCode } })
-$therm = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | ForEach-Object { [math]::Round($_.CurrentTemperature / 10 - 273.15, 1) })
-$bad = @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' | Select-Object -First 25 | ForEach-Object { [pscustomobject]@{ name = $_.Name; code = $_.ConfigManagerErrorCode; class = $_.PNPClass } })
+$mem = @(Get-CimInstance Win32_PhysicalMemory -Property Capacity, ConfiguredClockSpeed, Manufacturer, DeviceLocator | ForEach-Object { [pscustomobject]@{ gb = [math]::Round($_.Capacity / 1GB, 1); mhz = $_.ConfiguredClockSpeed; maker = "$($_.Manufacturer)".Trim(); slot = $_.DeviceLocator } })
+$gpu = @(Get-CimInstance Win32_VideoController -Property Name, DriverVersion, Status, ConfigManagerErrorCode | ForEach-Object { [pscustomobject]@{ name = $_.Name; driver = $_.DriverVersion; status = $_.Status; code = $_.ConfigManagerErrorCode } })
+$therm = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -Property CurrentTemperature | ForEach-Object { [math]::Round($_.CurrentTemperature / 10 - 273.15, 1) })
+$bad = @(Get-CimInstance Win32_PnPEntity -Property Name, ConfigManagerErrorCode, PNPClass -Filter 'ConfigManagerErrorCode <> 0' | Select-Object -First 25 | ForEach-Object { [pscustomobject]@{ name = $_.Name; code = $_.ConfigManagerErrorCode; class = $_.PNPClass } })
 $whea = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = (Get-Date).AddDays(-7) } -MaxEvents 20).Count
-$model = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufacturer, Model
-[pscustomobject]@{ cpu = $cpu; cpu_performance_percent = $perf; memory_modules = $mem; gpus = $gpu; thermal_c = $therm; problem_devices = $bad; whea_errors_7d = $whea; model = $model } | ConvertTo-Json -Compress -Depth 4
+[pscustomobject]@{ cpu_performance_percent = $perf; memory_modules = $mem; gpus = $gpu; thermal_c = $therm; problem_devices = $bad; whea_errors_7d = $whea } | ConvertTo-Json -Compress -Depth 4
 """
 
 
@@ -52,14 +53,32 @@ def _model_name(maker, model):
     return (model if model.lower().startswith(maker.lower()) else f"{maker} {model}".strip()) or None
 
 
+def _registry_text(path, name):
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+            return str(winreg.QueryValueEx(key, name)[0]).strip() or None
+    except OSError:
+        return None
+
+
 def _windows():
     output = powershell(WINDOWS_SCRIPT, timeout=45)["stdout"]
     try:
         raw = json.loads(output) if output else {}
     except json.JSONDecodeError:
         raw = {}
-    cpu = raw.get("cpu") or {}
-    model = raw.get("model") or {}
+    frequency = psutil.cpu_freq()
+    bios = r"HARDWARE\DESCRIPTION\System\BIOS"
+    cpu = {
+        "Name": _registry_text(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString"),
+        "NumberOfCores": psutil.cpu_count(logical=False),
+        "NumberOfLogicalProcessors": psutil.cpu_count(logical=True),
+        "LoadPercentage": round(psutil.cpu_percent(interval=None)),
+        "MaxClockSpeed": round(frequency.max) if frequency and frequency.max else None,
+    }
+    model = {"Manufacturer": _registry_text(bios, "SystemManufacturer"), "Model": _registry_text(bios, "SystemProductName")}
     devices = [
         {"name": item.get("name"), "class": item.get("class"), "code": item.get("code"), "problem": PNP_ERRORS.get(item.get("code"), f"error code {item.get('code')}")}
         for item in _as_list(raw.get("problem_devices")) if item.get("code") not in IGNORED_PNP_CODES
@@ -182,3 +201,122 @@ def rescan_hardware():
     result = run_command(["pnputil", "/scan-devices"], timeout=110)
     ok = result["returncode"] == 0
     return {"ok": ok, "summary": "Hardware rescan finished" if ok else f"Hardware rescan failed: {result['stderr'][:200] or result['stdout'][:200]}", "changed": ok}
+
+
+# ---------------------------------------------------------------------------
+# Input devices: keyboards, mice, touchpads
+# ---------------------------------------------------------------------------
+
+INPUT_SCRIPT = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+@(Get-CimInstance Win32_PnPEntity -Property Name, PNPClass, Status, ConfigManagerErrorCode, Manufacturer, PNPDeviceID -Filter "PNPClass='Keyboard' OR PNPClass='Mouse' OR (PNPClass='HIDClass' AND (Name LIKE '%touch%' OR Name LIKE '%digitizer%' OR Name LIKE '%-compliant pen%'))" | ForEach-Object { [pscustomobject]@{ name = $_.Name; class = $_.PNPClass; status = $_.Status; code = $_.ConfigManagerErrorCode; maker = $_.Manufacturer; device_id = $_.PNPDeviceID } }) | ConvertTo-Json -Compress
+"""
+INPUT_PLURALS = {"mouse": "mice", "touch screen": "touch screens"}
+# Intel HID event filters (hotkeys, power and volume buttons) register as a keyboard but are not one.
+INTEL_HOTKEY_FILTER = re.compile(r"^HID\\(INTC816|INT33D5|INTC10[0-9A-F]{2})")
+LINUX_BUSES = {"0003": "USB", "0005": "Bluetooth", "0011": "built-in", "0018": "built-in"}
+LINUX_IGNORED_INPUTS = re.compile(r"power button|sleep button|lid switch|video bus|pc speaker|hdmi|headphone|mic|consumer control|system control|wmi hotkeys|intel hid events", re.I)
+
+
+def _input_kind(name, device_class):
+    lowered = (name or "").lower()
+    if device_class == "Keyboard":
+        return "keyboard"
+    if "touch pad" in lowered or "touchpad" in lowered or "trackpad" in lowered:
+        return "touchpad"
+    if "touch screen" in lowered or "touchscreen" in lowered:
+        return "touch screen"
+    if "pen" in lowered or "digitizer" in lowered:
+        return "pen"
+    return "mouse"
+
+
+def _windows_connection(device_id):
+    text = (device_id or "").upper()
+    if "BTH" in text or "{00001124" in text or "{00001812" in text:
+        return "Bluetooth"
+    if text.startswith("ACPI\\"):
+        return "built-in"
+    if text.startswith(("HID\\CONVERTEDDEVICE", "HID\\VIRTUAL", "TERMINPUT")) or INTEL_HOTKEY_FILTER.match(text):
+        return "virtual"
+    if "VID_" in text:
+        return "USB / wireless receiver"
+    if text.startswith("HID\\"):
+        return "built-in"
+    return "other"
+
+
+def _physical_device(device_id):
+    """One physical device can show up as several HID collections (a touchpad also registers a "mouse"):
+    HID\\ELAN076D&COL01\\5&36A7250&0&0000 and ...&COL03\\5&36A7250&0&0002 -> ELAN076D|5&36A7250&0."""
+    parts = (device_id or "").upper().split("\\")
+    if len(parts) < 3:
+        return device_id
+    return re.sub(r"&COL[0-9A-F]+", "", parts[1]) + "|" + parts[2].rsplit("&", 1)[0]
+
+
+def _windows_inputs():
+    output = powershell(INPUT_SCRIPT, timeout=45)["stdout"]
+    try:
+        rows = _as_list(json.loads(output)) if output else []
+    except json.JSONDecodeError:
+        rows = []
+    devices = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        code = row.get("code") or 0
+        problem = PNP_ERRORS.get(code) or (f"problem code {code}" if code and code not in IGNORED_PNP_CODES else None)
+        devices.append({"name": row["name"], "kind": _input_kind(row["name"], row.get("class")), "connection": _windows_connection(row.get("device_id")),
+                        "maker": row.get("maker"), "status": "disabled" if code == 22 else "problem" if problem else "working", "problem": problem,
+                        "_physical": _physical_device(row.get("device_id"))})
+    # A touchpad's own mouse collection is the same touchpad, not a second mouse (unless it reports a problem).
+    touchpads = {item["_physical"] for item in devices if item["kind"] == "touchpad"}
+    devices = [item for item in devices if not (item["kind"] == "mouse" and item["_physical"] in touchpads and item["status"] == "working")]
+    for item in devices:
+        item.pop("_physical")
+    return devices
+
+
+def parse_proc_input(text):
+    """Keyboards and pointing devices from /proc/bus/input/devices (one block per device)."""
+    devices = []
+    for block in (text or "").split("\n\n"):
+        name = re.search(r'^N: Name="(.*)"', block, re.M)
+        handlers = re.search(r"^H: Handlers=(.*)$", block, re.M)
+        bus = re.search(r"^I: Bus=([0-9a-fA-F]{4})", block, re.M)
+        if not name or not handlers or LINUX_IGNORED_INPUTS.search(name.group(1)):
+            continue
+        handler_list = handlers.group(1).split()
+        if any(item.startswith("mouse") for item in handler_list):
+            kind = _input_kind(name.group(1), "Mouse")
+        elif "kbd" in handler_list and ("keyboard" in name.group(1).lower() or re.search(r"^B: EV=1[02]0013$", block, re.M)):
+            kind = "keyboard"
+        else:
+            continue
+        devices.append({"name": name.group(1), "kind": kind, "connection": LINUX_BUSES.get((bus.group(1) if bus else "").lower(), "other"),
+                        "maker": None, "status": "working", "problem": None})
+    return devices
+
+
+@tool("input_devices", "Keyboards, mice, touchpads and pens this computer detects, how they connect (built-in, USB, Bluetooth) and their driver status. Use when a keyboard, mouse or touchpad does not work.",
+      os=frozenset({"Windows", "Linux"}), timeout=60)
+def input_devices():
+    if os_name() == "Windows":
+        devices = _windows_inputs()
+    else:
+        try:
+            with open("/proc/bus/input/devices", encoding="utf-8", errors="replace") as handle:
+                devices = parse_proc_input(handle.read())
+        except OSError as error:
+            return {"ok": False, "summary": f"Could not read input devices: {error}", "data": None}
+    real = [item for item in devices if item["connection"] != "virtual"]
+    counts = Counter(item["kind"] for item in real)
+    problems = [item for item in devices if item["status"] == "problem"]
+    found = ", ".join(f"{count} {INPUT_PLURALS.get(kind, kind + 's') if count > 1 else kind}" for kind, count in sorted(counts.items())) or "no keyboard or mouse"
+    if problems:
+        summary = f"{found}; {len(problems)} with a driver problem: " + ", ".join(f"{item['name']} ({item['problem']})" for item in problems[:3])
+    else:
+        summary = f"{found} detected, all working" if real else "No keyboard, mouse or touchpad detected"
+    return {"ok": True, "summary": summary, "data": {"devices": devices[:30], "keyboards": counts.get("keyboard", 0),
+                                                     "pointing": sum(count for kind, count in counts.items() if kind != "keyboard"), "problems": len(problems)}}

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261016c">
   <script>
     try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
   </script>
@@ -21,6 +21,7 @@
     <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 011 1v11a1 1 0 01-1 1H9l-5 4v-4H4a1 1 0 01-1-1V5a1 1 0 011-1z"/></symbol>
     <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9 3a3 3 0 00-3 3 3 3 0 00-2 5 3 3 0 001 5 3 3 0 004 4 3 3 0 002-1V4a3 3 0 00-2-1zm6 0a3 3 0 013 3 3 3 0 012 5 3 3 0 01-1 5 3 3 0 01-4 4 3 3 0 01-2-1V4a3 3 0 012-1z"/></symbol>
     <symbol id="i-devices" viewBox="0 0 24 24"><path d="M3 5h14v9H3zm-2 11h18v2H1zM19 8h4v12h-4z"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 2l9 5v10l-9 5-9-5V7zm0 2.3L5.5 8 12 11.7 18.5 8zM5 9.7v6.1l6 3.4v-6.1zm8 9.5l6-3.4V9.7l-6 3.4z"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 018.5 4a8.5 8.5 0 1011.5 11.5z"/></symbol>
     <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 4H4v16h6v-2H6V6h4zm5 3l-1.4 1.4 2.6 2.6H9v2h7.2l-2.6 2.6L15 17l5-5z"/></symbol>
@@ -32,7 +33,7 @@
       <div class="brand">
         <span class="brand-mark"><svg><use href="#i-shield"/></svg></span>
         <div>
-          <strong>AIops</strong>
+          <strong><span class="brand-ai">AI</span>ops</strong>
           <small>AI IT TROUBLESHOOTER</small>
         </div>
       </div>
@@ -49,8 +50,10 @@
         <p class="nav-group">AI</p>
         <button class="nav-item" data-tab="technician"><svg><use href="#i-chat"/></svg>Ask Technician</button>
         <button class="nav-item" data-tab="learning"><svg><use href="#i-brain"/></svg>Learning <b id="learn-count"></b></button>
+        <button class="nav-item" data-tab="decisions"><svg><use href="#i-list"/></svg>Decisions</button>
         <p class="nav-group">Fleet</p>
         <button class="nav-item" data-tab="agents"><svg><use href="#i-devices"/></svg>Agents <b id="agent-count">0</b></button>
+        <button class="nav-item" data-tab="software"><svg><use href="#i-box"/></svg>Software</button>
         <button class="nav-item" data-tab="add-agent"><svg><use href="#i-plus"/></svg>Add Agent</button>
       </nav>
 
@@ -71,14 +74,24 @@
 
     <main class="content">
       <div class="topbar">
-        <span id="ai-chip" class="ai-chip"><span class="dot"></span><span id="ai-chip-text">AI: checking...</span></span>
+        <div class="model-switcher">
+          <button id="ai-chip" class="ai-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-panel" title="Switch AI model"><span class="dot"></span><span id="ai-chip-text">AI: checking...</span><span class="chip-switch">Change ▾</span></button>
+          <div id="model-panel" class="model-panel hidden" role="dialog" aria-label="AI model">
+            <div class="model-panel-head">
+              <strong>AI model</strong>
+              <small>Runs locally in Ollama. Switching frees the old model's memory, then loads the new one.</small>
+            </div>
+            <div id="model-list" class="model-list"><p class="soft-label">Loading models...</p></div>
+            <p id="model-panel-status" class="model-panel-status" role="status"></p>
+          </div>
+        </div>
         <span id="last-updated" class="timestamp">Waiting for telemetry</span>
       </div>
 
       <div id="ai-banner" class="ai-banner hidden">
         <span>AI OFFLINE</span>
         <strong>The AI technician is unavailable</strong>
-        <p id="ai-banner-detail">Install Ollama and pull a model (<code>ollama pull qwen2.5:3b</code>) to enable AI troubleshooting and chat. Local monitoring remains active.</p>
+        <p id="ai-banner-detail">Install Ollama and pull a model (<code>ollama pull qwen3:8b</code>) to enable AI troubleshooting and chat. Local monitoring remains active.</p>
       </div>
 
       <!-- ============================== DASHBOARD ============================== -->
@@ -149,7 +162,7 @@
           <div>
             <p class="kicker">Agentic AI · automated diagnosis</p>
             <h1>What's the issue?</h1>
-            <p class="subheading">Describe the problem. The AI agent runs diagnostics on the selected device, finds the root cause and proposes fixes you can apply with one click. It learns from every ticket it resolves.</p>
+            <p class="subheading">Describe the problem. The AI runs diagnostics on the selected device, thinks it through and suggests 3-4 ranked solutions. <strong>Nothing changes on the device until you approve a solution.</strong> It learns from every ticket.</p>
           </div>
           <span id="ai-model-label" class="soft-label">AI: checking...</span>
         </header>
@@ -165,9 +178,10 @@
             <p class="field-label">Speed</p>
             <div id="ts-mode" class="mode-toggle" role="radiogroup" aria-label="Diagnosis speed">
               <button type="button" class="mode-option" data-mode="instant" role="radio" aria-checked="false"><strong>Instant</strong><small>Rule checks only, seconds</small></button>
-              <button type="button" class="mode-option active" data-mode="fast" role="radio" aria-checked="true"><strong>Fast AI</strong><small>Checks + one AI pass</small></button>
-              <button type="button" class="mode-option" data-mode="deep" role="radio" aria-checked="false"><strong>Deep AI</strong><small>AI investigates further</small></button>
+              <button type="button" class="mode-option active" data-mode="fast" role="radio" aria-checked="true"><strong>AI diagnosis</strong><small>Checks + deep-thinking AI</small></button>
+              <button type="button" class="mode-option" data-mode="deep" role="radio" aria-checked="false"><strong>Deep AI</strong><small>AI runs more checks first</small></button>
             </div>
+            <p class="soft-label ts-mode-note">AI diagnoses think deeply before answering, so expect about 5-10 minutes on a laptop CPU. You can watch the reasoning live. Instant needs no AI.</p>
             <div class="ts-actions">
               <button id="ts-start" class="primary-button"><svg><use href="#i-spark"/></svg>Diagnose</button>
               <span id="ts-form-status" class="soft-label"></span>
@@ -252,20 +266,50 @@
       <section id="performance" class="tab">
         <header class="page-heading">
           <div>
-            <p class="kicker">Active benchmark</p>
+            <p class="kicker">Per device · OS &amp; hardware tests</p>
             <h1>Performance</h1>
-            <p class="subheading">On-demand CPU, disk, and network throughput tests. They briefly use CPU, disk, and network, so they run only when you ask.</p>
+            <p class="subheading">One full test of a device: live load, a speed benchmark, start-up time, hardware, disks, battery, keyboard and mouse, and every OS and app update waiting. The test only reads; nothing is installed or changed until you click a button and confirm.</p>
           </div>
-          <button id="run-performance" class="primary-button">Run test now</button>
+          <button id="perf-run" class="primary-button" type="button"><svg><use href="#i-gauge"/></svg>Run full test</button>
         </header>
-
-        <p id="performance-status" class="soft-label">No test has run yet in this session.</p>
-
-        <div class="metric-grid status-grid">
-          <article class="metric-card" id="perf-cpu-card"><div class="metric-head"><span>CPU</span><span id="perf-cpu-state" class="metric-state">--</span></div><p id="perf-cpu-detail">Not tested yet</p></article>
-          <article class="metric-card" id="perf-disk-card"><div class="metric-head"><span>Disk I/O</span><span id="perf-disk-state" class="metric-state">--</span></div><p id="perf-disk-detail">Not tested yet</p></article>
-          <article class="metric-card" id="perf-network-card"><div class="metric-head"><span>Network</span><span id="perf-network-state" class="metric-state">--</span></div><p id="perf-network-detail">Not tested yet</p></article>
+        <div class="sw-toolbar">
+          <label class="sw-field"><span>Device</span><select id="perf-device" class="field-input"></select></label>
+          <p id="perf-status" class="sw-status perf-status" role="status">Pick a device and click Run full test.</p>
         </div>
+
+        <section id="perf-ai" class="panel perf-ai hidden" aria-live="polite"></section>
+        <div id="perf-findings" class="perf-findings hidden"></div>
+        <div id="perf-sections" class="perf-grid"></div>
+        <section id="perf-updates" class="panel hidden"></section>
+
+        <section class="panel perf-input-test">
+          <div class="section-heading">
+            <div><p class="kicker">Input test · this computer</p><h2>Keyboard and mouse tester</h2>
+              <p class="soft-label">Tests the keyboard, mouse or touchpad of the computer you are using this browser on (the device check above lists what the selected device detects).</p></div>
+            <button id="input-reset" class="ghost-button" type="button">Reset</button>
+          </div>
+          <div class="input-test-grid">
+            <div>
+              <div id="kb-tester" class="kb-tester" tabindex="0" aria-label="Keyboard tester: click here, then press every key">
+                <p class="kb-hint">Click here, then press every key. Keys turn green once they register; a key held down for more than 2 seconds is flagged as possibly stuck. Esc also leaves the tester.</p>
+                <div id="kb-layout" class="kb-layout"></div>
+              </div>
+              <p id="kb-result" class="soft-label" role="status">No keys tested yet.</p>
+            </div>
+            <div>
+              <div id="mouse-pad" class="mouse-pad" aria-label="Mouse tester: click, double-click, scroll and move in this area">
+                <canvas id="mouse-trail" class="mouse-trail"></canvas>
+                <div class="mouse-buttons">
+                  <span class="mouse-btn" data-mouse-btn="0">Left</span><span class="mouse-btn" data-mouse-btn="1">Middle</span><span class="mouse-btn" data-mouse-btn="2">Right</span>
+                  <span class="mouse-btn" data-mouse-btn="3">Back</span><span class="mouse-btn" data-mouse-btn="4">Forward</span>
+                  <span class="mouse-btn" data-mouse-btn="dbl">Double-click</span><span class="mouse-btn" data-mouse-btn="up">Scroll up</span><span class="mouse-btn" data-mouse-btn="down">Scroll down</span>
+                </div>
+                <p class="kb-hint">Click each button, double-click, scroll both ways and move around in this box.</p>
+              </div>
+              <p id="mouse-result" class="soft-label" role="status">No mouse input yet.</p>
+            </div>
+          </div>
+        </section>
       </section>
 
       <!-- ============================== EVENT LOGS ============================== -->
@@ -276,7 +320,10 @@
             <h1>Event Logs</h1>
             <p class="subheading">Recent warning, error, and critical entries from Windows Event Viewer, journald, or the macOS unified log.</p>
           </div>
-          <button id="refresh-logs" class="ghost-button">Re-scan now</button>
+          <div class="button-row">
+            <label class="device-picker"><span>Device</span><select id="logs-device" class="field-input"></select></label>
+            <button id="refresh-logs" class="ghost-button">Re-scan now</button>
+          </div>
         </header>
 
         <div class="metric-grid status-grid">
@@ -288,7 +335,7 @@
         <section class="panel">
           <div class="section-heading">
             <div><p class="kicker">Assisted analysis</p><h2>Recent events</h2></div>
-            <button id="diagnose-logs-button" class="ghost-button">Diagnose with AI</button>
+            <div class="button-row"><label class="think-toggle" title="The AI reasons step by step before answering: better answers, but several minutes on a laptop CPU"><input type="checkbox" id="logs-think"> Think deeper</label><button id="diagnose-logs-button" class="ghost-button">Diagnose with AI</button></div>
           </div>
           <div id="logs-diagnosis" class="diagnosis hidden"></div>
           <div class="table-wrap flat">
@@ -308,6 +355,7 @@
             <h1>Ask Technician</h1>
             <p class="subheading">Describe what you are seeing and get grounded, step-by-step help.</p>
           </div>
+          <label class="device-picker"><span>Device</span><select id="chat-device" class="field-input"></select></label>
         </header>
         <div class="chat-layout">
           <section class="chat-panel">
@@ -316,6 +364,7 @@
             </div>
             <form id="chat-form" class="chat-form">
               <input id="chat-input" autocomplete="off" placeholder="Why is my memory usage high?" aria-label="Ask the technician">
+              <label class="think-toggle" title="The AI reasons step by step before answering: better answers, but several minutes on a laptop CPU"><input type="checkbox" id="chat-think"> Think deeper</label>
               <button type="submit">Send</button>
             </form>
           </section>
@@ -333,12 +382,29 @@
       </section>
 
       <!-- ============================== LEARNING ============================== -->
+      <section id="decisions" class="tab">
+        <header class="page-heading">
+          <div>
+            <p class="kicker">Audit trail · suggest-only AI</p>
+            <h1>Decisions</h1>
+            <p class="subheading">Every diagnosis and analysis the AI made, and every action a person approved, rejected or did by hand. Each one is also saved as a file in the <code id="decisions-folder">decisions</code> folder.</p>
+          </div>
+          <button id="decisions-refresh" class="ghost-button">Refresh</button>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Decision</th><th>Device</th><th>Summary</th><th>By</th><th>Model</th></tr></thead>
+            <tbody id="decisions-body"><tr><td colspan="6" class="empty-state">Loading decisions...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="learning" class="tab">
         <header class="page-heading">
           <div>
             <p class="kicker">Self-improving AI</p>
             <h1>Learning</h1>
-            <p class="subheading">Every finished ticket becomes a learned case. Verified fixes and your 👍 / 👎 feedback are distilled into the <code id="learn-model-name">sentinel-tech</code> model, so the agent gets better with every issue it resolves.</p>
+            <p class="subheading">Every finished ticket becomes a learned case. Verified fixes and your 👍 / 👎 feedback are distilled into the <code id="learn-model-name">aiops-brain</code> model, so the agent gets better with every issue it resolves.</p>
           </div>
           <div class="button-row">
             <a id="learn-dataset" class="ghost-button" href="/api/learning/dataset">Export training data</a>
@@ -395,6 +461,36 @@
         <section id="device-detail" class="device-detail hidden"></section>
       </section>
 
+      <!-- ============================== SOFTWARE ============================== -->
+      <section id="software" class="tab">
+        <header class="page-heading">
+          <div>
+            <p class="kicker">Fleet · installed programs</p>
+            <h1>Software</h1>
+            <p class="subheading">Everything installed on a device, with available updates. Updates use winget (Windows) or apt/dnf (Linux); uninstall runs the program's own silent uninstaller. <strong>Remove completely</strong> also finds what the program left behind and moves the items you choose to a quarantine you can restore for 7 days.</p>
+          </div>
+          <button id="sw-scan" class="primary-button"><svg><use href="#i-spark"/></svg>Scan now</button>
+        </header>
+        <div class="sw-toolbar">
+          <label class="sw-field"><span>Device</span><select id="sw-device" class="field-input"></select></label>
+          <label class="sw-field sw-search"><span>Search</span><input id="sw-search" class="field-input" type="search" placeholder="Name or publisher"></label>
+          <div id="sw-filter" class="mode-toggle sw-filter" role="radiogroup" aria-label="Filter">
+            <button class="mode-option active" type="button" data-filter="all" role="radio" aria-checked="true">All</button>
+            <button class="mode-option" type="button" data-filter="updates" role="radio" aria-checked="false">Updates available</button>
+          </div>
+          <button id="sw-quarantine-btn" class="ghost-button" type="button" title="Leftovers moved aside by Remove completely, restorable for 7 days">Quarantine</button>
+        </div>
+        <p id="sw-status" class="sw-status" role="status"></p>
+        <section id="sw-leftovers" class="panel sw-panel hidden" aria-live="polite"></section>
+        <section id="sw-quarantine" class="panel sw-panel hidden"></section>
+        <div class="table-wrap">
+          <table class="sw-table">
+            <thead><tr><th>Program</th><th>Version</th><th>Publisher</th><th>Installed</th><th>Size</th><th class="sw-actions-col">Actions</th></tr></thead>
+            <tbody id="sw-body"><tr><td colspan="6" class="empty-state">Pick a device and click Scan now.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- ============================== ADD AGENT ============================== -->
       <section id="add-agent" class="tab">
         <header class="page-heading">
@@ -411,7 +507,8 @@
             <h2>Server address</h2>
             <p class="modal-copy">The address the remote device uses to reach this server.</p>
             <input id="enroll-server" class="field-input" autocomplete="off" spellcheck="false">
-            <p id="enroll-server-warning" class="enroll-warning hidden">This address only works on this computer. To add other devices, enter this machine's LAN IP, e.g. <code>http://192.168.1.20:8000</code>. Installing the agent on this same laptop works as is.</p>
+            <p id="enroll-server-warning" class="enroll-warning hidden">This address only works on this computer. To add other devices, enter this machine's LAN IP, e.g. <code>http://192.168.1.20</code>. Installing the agent on this same laptop works as is.</p>
+            <p id="enroll-ngrok-note" class="enroll-warning hidden"></p>
           </section>
 
           <section id="enroll-token-step" class="panel enroll-step">
@@ -452,6 +549,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20261016c"></script>
 </body>
 </html>

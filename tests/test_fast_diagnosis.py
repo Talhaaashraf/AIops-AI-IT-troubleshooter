@@ -33,7 +33,7 @@ class Provider:
     def status(self):
         return {"available": self.available, "provider": "fake", "model": "fake", "message": "fake is down"}
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):
         self.calls.append({"tools": bool(tools), "json_mode": json_mode, "max_tokens": max_tokens})
         return self.replies.pop(0)
 
@@ -65,7 +65,9 @@ def test_fast_mode_runs_the_baseline_in_parallel_and_calls_the_llm_once(monkeypa
     session = session_store.get_session(session_id)
     assert session["status"] == "diagnosed"
     # One report call, no investigation round, output capped.
-    assert provider.calls == [{"tools": False, "json_mode": True, "max_tokens": planner.REPORT_MAX_TOKENS}]
+    # Diagnoses think deeply by default, so the report gets the larger cap (thinking tokens count toward it).
+    expected_cap = planner.REPORT_THINKING_MAX_TOKENS if planner.diagnosis_thinking() else planner.REPORT_MAX_TOKENS
+    assert provider.calls == [{"tools": False, "json_mode": True, "max_tokens": expected_cap}]
     # disk_full playbook: system_overview, then cleanup_candidates: 2 phases of 0.2 s, not one per tool.
     assert [entry[0] for entry in log] == ["system_overview", "cleanup_candidates"]
     assert elapsed < 1.5
@@ -228,3 +230,46 @@ def test_virtual_and_removable_drives_are_not_disk_full_problems():
     ], "Windows")
     assert [item["key"] for item in found] == ["ram_high"]
     assert "vmmemWSL 15.5%" in found[0]["detail"]
+
+
+def test_deep_mode_falls_back_to_rules_when_the_ai_investigation_times_out(monkeypatch):
+    from backend.llm import LLMUnavailableError
+
+    class SlowProvider(Provider):
+        def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):
+            self.calls.append({"tools": bool(tools), "max_tokens": max_tokens, "timeout": timeout})
+            raise LLMUnavailableError(f"Ollama did not answer within {timeout}s")
+
+    provider = SlowProvider()
+    monkeypatch.setattr(planner, "get_provider", lambda: provider)
+    monkeypatch.setattr(planner, "execute", scripted_execute([], lambda tool_id: FULL_DISK if tool_id == "system_overview" else {}, delay=0))
+    session_id = session_store.create_session("local", "box", "Windows", "my disk is full", None)
+    asyncio.run(planner.run_diagnosis(session_id, mode="deep"))
+
+    session = session_store.get_session(session_id)
+    assert session["status"] == "diagnosed"  # not "failed": the evidence already collected still answers
+    assert "AI did not answer in time" in session["report"]["root_cause"] or session["report"]["quick_findings"]
+    # The investigation call is capped and uses the diagnosis deadline, not the global 10-minute timeout.
+    assert provider.calls[0] == {"tools": True, "max_tokens": planner.INVESTIGATE_MAX_TOKENS, "timeout": planner.ai_call_timeout()}
+    assert len(provider.calls) == 1  # no second slow call for the report
+
+
+def test_working_internet_is_not_reported_broken_when_the_gateway_lookup_fails():
+    stages = {"adapters_with_ip": [{"name": "Wi-Fi"}], "self_assigned_ip": True, "default_gateway": None, "gateway_ping": None,
+              "dns_resolution": {"ok": True, "ms": 20}, "tcp_to_internet": {"ok": True, "ms": 15}, "http": {"ok": True, "status": 204}}
+    assert findings._check_internet(stages, "Internet connectivity works normally", {}, "Windows") == []
+    broken = {**stages, "tcp_to_internet": {"ok": False}, "http": {"ok": False}}
+    assert findings._check_internet(broken, "No default gateway", {}, "Windows")[0]["key"] == "net_no_gateway"
+
+
+def test_network_complaint_is_not_blamed_on_an_unrelated_finding():
+    report = {"root_cause": "The disk is nearly full, which might cause DNS issues", "confidence": "medium"}
+    found = [{"key": "disk_full:C:\\", "title": "Disk C:\\ is 86.5% full"}]
+    evidence = [("check_internet", {}, {"ok": True, "summary": "Internet connectivity works normally"}),
+                ("wifi_status", {}, {"ok": True, "summary": "Wi-Fi connected to Office, signal 83%"})]
+    grounded = planner.ground_root_cause(dict(report), get_playbook("no_internet"), found, evidence)
+    assert grounded["root_cause"].startswith("The network checks passed (Internet connectivity works normally; Wi-Fi connected to Office")
+    assert "Separate problems found: Disk C:\\ is 86.5% full." in grounded["root_cause"] and grounded["confidence"] == "low"
+    # A real network finding, or a different complaint, keeps the model's diagnosis.
+    assert planner.ground_root_cause(dict(report), get_playbook("no_internet"), found + [{"key": "net_dns", "title": "DNS is failing"}], evidence) == report
+    assert planner.ground_root_cause(dict(report), get_playbook("slow_pc"), found, evidence) == report

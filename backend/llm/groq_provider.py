@@ -51,7 +51,7 @@ class GroqProvider:
     def warm_up(self):
         return self.is_available()
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):  # noqa: ARG002 - same signature as Ollama
         kwargs = {"model": self.model, "messages": self._to_openai(messages), "temperature": temperature}
         if max_tokens:
             kwargs["max_tokens"] = int(max_tokens)
@@ -60,6 +60,8 @@ class GroqProvider:
         elif json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         try:
+            if timeout:
+                kwargs["timeout"] = timeout
             response = self._client().chat.completions.create(**kwargs)
         except LLMUnavailableError:
             raise

@@ -17,6 +17,9 @@ services:
       OLLAMA_NUM_PARALLEL: 1
       OLLAMA_MAX_LOADED_MODELS: 1
       OLLAMA_FLASH_ATTENTION: 1
+      # 8-bit KV cache (needs flash attention): half the context memory, so an 8B model fits
+      # a laptop's Docker VM with room to spare, with negligible quality loss.
+      OLLAMA_KV_CACHE_TYPE: q8_0
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -33,7 +36,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      BASE_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      BASE_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
     volumes:
       - ./models:/models:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -58,6 +61,8 @@ services:
     depends_on:
       model-init:
         condition: service_completed_successfully
+    # New installs go through nginx (port 80) or ngrok. Port 8000 stays published only because agents
+    # installed earlier still report to :8000; once they are reinstalled, change it to "127.0.0.1:8000:8000".
     ports:
       - "8000:8000"
     env_file:
@@ -69,10 +74,74 @@ services:
       DIAGNOSIS_MODE: ${DIAGNOSIS_MODE:-fast}
       SENTINEL_DB_PATH: /data/sentinel.db
       SENTINEL_MODELS_DIR: /app/models
+      DECISIONS_DIR: /app/decisions
+      NGROK_API_URL: http://ngrok:4040
     volumes:
       - sentinel_data:/data
       - ./models:/app/models
       - ./agent_builds:/app/agent_builds:ro
+      # Every AI decision and every approval, as JSON + a daily index (see backend/decision_log.py).
+      - ./decisions:/app/decisions
+    # "edge" lets the app read the public URL from ngrok's local API (NGROK_API_URL).
+    networks:
+      - default
+      - edge
+
+  # Reverse proxy: LAN users on port 80, and the target ngrok publishes.
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      sentinel:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      default:
+      edge:
+        ipv4_address: 172.28.5.2
+    volumes:
+      - ./deploy/nginx/aiops.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Public https URL. Needs NGROK_AUTHTOKEN in .env; without it the service waits instead of crash-looping.
+  # The free plan gives a random URL that changes on every restart (re-run agent installs after a change).
+  ngrok:
+    image: ngrok/ngrok:3-alpine
+    restart: unless-stopped
+    depends_on:
+      nginx:
+        condition: service_healthy
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      - "127.0.0.1:4040:4040"
+    # Fixed address: nginx trusts forwarding headers (real visitor IP, https) only from this IP.
+    networks:
+      edge:
+        ipv4_address: 172.28.5.10
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$NGROK_AUTHTOKEN" ]; then
+          echo "NGROK_AUTHTOKEN is not set in .env: public URL disabled (LAN access via nginx still works)."
+          exec sleep 2147483647
+        fi
+        exec ngrok http http://nginx:80 --log stdout --web-addr 0.0.0.0:4040
+
+networks:
+  default:
+  # nginx <-> ngrok only, with fixed addresses (see deploy/nginx/aiops.conf).
+  edge:
+    ipam:
+      config:
+        - subnet: 172.28.5.0/24
+          # Automatic addresses come from .128-.255, so the fixed ones (.2 nginx, .10 ngrok) never collide.
+          ip_range: 172.28.5.128/25
 
 volumes:
   ollama_data:

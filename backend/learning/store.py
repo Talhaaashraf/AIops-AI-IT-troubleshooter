@@ -2,7 +2,7 @@
 
 The agent consults this memory before diagnosing (similar past cases and the
 fixes that actually resolved them) and the model builder distills it into the
-self-improving `sentinel-tech` model. Operator feedback (thumbs up/down and a
+self-improving `aiops-brain` model. Operator feedback (thumbs up/down and a
 corrected root cause) outranks the agent's own verdict.
 """
 

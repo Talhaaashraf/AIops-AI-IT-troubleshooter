@@ -24,25 +24,35 @@ Copy-Item .env.example .env
 2. Pull a model that supports tool calling:
 
    ```powershell
-   ollama pull qwen2.5:3b     # default: runs on most laptop CPUs, a fast diagnosis takes 25-60 seconds
-   ollama pull qwen2.5:7b     # better reasoning; needs about 6 GB of free RAM
+   ollama pull qwen3:8b       # default: Apache 2.0, strong tool calling; needs about 7 GB of free RAM
+   ollama pull qwen2.5:3b     # faster on low-RAM laptops; research-only license
    ```
 
 3. Set it in `.env`:
 
    ```text
    LLM_PROVIDER=ollama
-   OLLAMA_MODEL=qwen2.5:3b
+   OLLAMA_MODEL=qwen3:8b
    ```
 
-On a CPU-only laptop, a **Fast AI** diagnosis takes 25-60 seconds and an **Instant** one takes 5-15 seconds without any AI (see the speed modes below). `qwen2.5:7b` gives better root-cause explanations, but if it times out, use `qwen2.5:3b`, close memory-heavy apps, or raise `OLLAMA_TIMEOUT_SECONDS`. To use Groq instead (cloud), set `LLM_PROVIDER=groq` and `GROQ_API_KEY`.
+On a CPU-only laptop, a **Fast AI** diagnosis with `qwen3:8b` takes about 1-3 minutes and an **Instant** one takes 5-15 seconds without any AI (see the speed modes below). Thinking is off by default (`OLLAMA_THINK=false`) because it adds minutes on a CPU. If the 8B model times out or the laptop runs out of memory, use `qwen2.5:3b`, close memory-heavy apps, or raise `OLLAMA_TIMEOUT_SECONDS`. To use Groq instead (cloud), set `LLM_PROVIDER=groq` and `GROQ_API_KEY`.
+
+### AI health report, onboarding check and Software tab
+
+- **AI health report** (Agents → select a device → *AI health report*): an instant, rule-based report with a 0-100 health score, every detected issue (with the processes behind high CPU/RAM), and the full system details: specs, resources, disks, top processes, security, event logs, performance, network and battery. The AI then explains each detected issue, why it happens and 2-3 fix steps, plus prioritised actions. The AI only explains issues the rules found, so a small local model cannot invent problems.
+- **Onboarding health check**: the first time a device reports, AIops runs a full check-up diagnosis with AI on it (network, disks, security, hardware, updates, event logs) and shows the result on the device's card, with a link to the full report and its one-click fixes. A check cut short by a server restart runs again. Turn it off with `ONBOARDING_CHECK=false`.
+- **Software tab**: every program installed on a device, with version, publisher, install date and size, and which have updates (winget on Windows, apt/dnf on Linux). **Update** runs the package manager; **Uninstall** runs the program's own silent uninstaller (MSI, registered quiet uninstall, Inno Setup or winget). The server only sends an inventory id: the agent looks the program up again on the device, so no command line from the server is ever run. Programs without a silent uninstaller show *Manual*, because a GUI uninstaller would hang where no one can click it. The AIops agent, winget/Store components and packages the OS depends on are refused. Every uninstall and update is recorded in the remediation audit log. Devices need the 1.2.0 agent: re-run the install command on older ones.
+
+### Switching models from the dashboard
+
+Click the AI chip in the top-right corner of the dashboard to open the model switcher. It lists `qwen3:4b`, `qwen3:8b` and `qwen2.5:3b` with their size, free RAM needed, license and typical speed. **Download** pulls a model with a progress bar, and **Switch** unloads the current model to free its memory, then loads the new one. The choice is saved in the database, survives restarts and overrides `OLLAMA_MODEL`. If a model does not fit in free RAM, the chip turns red ("failed to load"): close memory-heavy apps or switch to a smaller model. The API is `GET /api/ai/models`, `POST /api/ai/models/select` and `POST /api/ai/models/pull` with `{"model": "<name>"}`.
 
 Monitoring, alerts and the dashboard all work without any AI. Only troubleshooting, diagnosis and chat need it. The status of the AI is shown at the top of the **What's the issue?** tab and at `GET /api/ai/status`.
 
 ## Run with Docker
 
 ```powershell
-python models/migrate_model.py qwen2.5:3b   # once: copies the model into models/qwen2.5-3b/
+python models/migrate_model.py qwen3:8b     # optional: copies the model into models/qwen3-8b/ for offline installs
 docker compose up -d --build                # ollama + model-init + sentinel
 ```
 
@@ -131,10 +141,10 @@ Set `"allow_remediation": false` to allow diagnostics only, or set `"max_risk": 
 ## Security model
 
 - **No arbitrary commands.** The LLM can only name registered tools. Arguments are schema-validated, and commands run as argument lists, never through a shell. Service restarts use an allow-list, and process kills need the exact PID and name; system processes are refused.
-- **The AI cannot fix things by itself.** During investigation it only sees read-only tools. Proposed fixes are validated against the registry, and each one runs only after an operator clicks **Apply**. The exception is `AUTO_FIX_MAX_RISK` (default `none`), which lets you allow, for example, `low`-risk fixes automatically.
+- **The AI never changes anything by itself.** During investigation it only sees read-only tools. It suggests 3-4 solutions; a runnable one is validated against the registry and runs only after a person clicks **Approve & run** and confirms. There is no auto-fix setting. Every diagnosis, approval and rejection is saved in the `decisions/` folder.
 - **Audit trail.** Every fix (device, tool, arguments, who approved it, result) is recorded. See `GET /api/troubleshoot/audit`.
 - **Dashboard login.** Set `DASHBOARD_PASSWORD` (or, as a fallback, `ADMIN_API_KEY`) and all pages, APIs and WebSockets require signing in at `/login`. Agent endpoints (`/api/agents/register`, `/report`, `/tasks/*`, `/install/*`, the bundle) use their own agent or enrollment token instead.
-- **LAN only.** There is no built-in HTTPS, and install scripts over plain HTTP are only safe on a trusted network. For remote sites, put a reverse proxy with HTTPS (nginx, Caddy) in front, and never expose the server directly to the internet.
+- **Public access goes through nginx + ngrok only.** nginx (port 80) proxies the app; ngrok publishes nginx on an https URL when `NGROK_AUTHTOKEN` is set. Install scripts over plain HTTP are only safe on a trusted network, so give remote devices the https ngrok address, keep `OPEN_ENROLLMENT=false` while public, and never publish port 8000 to the internet.
 
 ## Configuration (`.env`)
 
@@ -142,14 +152,15 @@ Set `"allow_remediation": false` to allow diagnostics only, or set `"max_risk": 
 | --- | --- | --- |
 | `LLM_PROVIDER` | `ollama` | `ollama` or `groq` |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server |
-| `OLLAMA_MODEL` | `qwen2.5:3b` | Model; use `qwen2.5:7b` when RAM allows |
+| `OLLAMA_MODEL` | `qwen3:8b` | Model; use `qwen2.5:3b` on low-RAM machines |
+| `OLLAMA_THINK` | `false` | Let thinking models reason before answering (slower) |
 | `OLLAMA_NUM_CTX` | `8192` | Context window |
 | `OLLAMA_TIMEOUT_SECONDS` | `600` | Per-call timeout |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM (reloading costs 10-30 s) |
 | `GROQ_API_KEY`, `GROQ_MODEL` | — | Optional cloud fallback |
 | `DIAGNOSIS_MODE` | `fast` | Default speed: `instant`, `fast` or `deep` |
 | `AGENT_MAX_STEPS` | `3` | Extra AI investigation rounds in deep mode |
-| `AUTO_FIX_MAX_RISK` | `none` | Auto-apply fixes up to `low` / `medium` / `high` |
+| `AGENT_AI_TIMEOUT_SECONDS` | `300` | Longest one AI call may take during a diagnosis. If the model is slower (low RAM), the session ends with the rule-based diagnosis instead of failing |
 | `ADMIN_API_KEY` | — | Required to generate enrollment tokens |
 | `DASHBOARD_PASSWORD` | — | Enables the dashboard login |
 | `SENTINEL_PUBLIC_URL` | browser URL | Server address written into install scripts |

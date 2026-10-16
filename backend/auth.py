@@ -41,9 +41,11 @@ def has_valid_session(cookies):
 
 # Agent-facing endpoints authenticate with their own agent/enrollment token, not the
 # dashboard cookie, so the session gate must let them through.
-PUBLIC_PATH_PREFIXES = (
-    "/login", "/logout", "/static",
-    "/install/",
-    "/api/agents/register", "/api/agents/report", "/api/agents/tasks/",
-    "/api/agents/bundle", "/api/agents/binary/",
-)
+# Exact paths, plus prefixes that end in "/": a device id such as "report1" must never make
+# /api/agents/report1/... public by sharing a prefix with an agent route.
+PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/agents/register", "/api/agents/report", "/api/agents/bundle"})
+PUBLIC_PATH_PREFIXES = ("/static/", "/install/", "/api/agents/tasks/", "/api/agents/binary/")
+
+
+def is_public_path(path):
+    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PATH_PREFIXES)

@@ -54,9 +54,39 @@ def get_firewall_status():
     return {"available": False, "enabled": None, "detail": f"Firewall check not implemented for {system}"}
 
 
+def windows_security_center_antivirus():
+    """Antivirus products registered with Windows Security Center, third-party ones included.
+
+    productState packs the status in its middle bytes: 0x1000 set means real-time protection is
+    on, 0x10 set means signatures are out of date (e.g. 0x41000 = on and current)."""
+    output = _run(["powershell", "-NoProfile", "-Command", "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Select-Object displayName, productState | ConvertTo-Json -Compress"])
+    if not output:
+        return []
+    try:
+        data = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    products = []
+    for item in data if isinstance(data, list) else [data]:
+        try:
+            state = int(item.get("productState") or 0)
+        except (TypeError, ValueError):
+            continue
+        products.append({"name": item.get("displayName") or "Unknown antivirus", "enabled": (state >> 12) & 0xF == 1, "up_to_date": (state >> 4) & 0xF == 0})
+    return products
+
+
 def get_antivirus_status():
     system = platform.system()
     if system == "Windows":
+        # Windows turns Defender off when another antivirus (Kaspersky, ESET, ...) takes over,
+        # so ask Security Center first; Get-MpComputerStatus alone reports such machines as unprotected.
+        active = [product for product in windows_security_center_antivirus() if product["enabled"]]
+        if active:
+            names = ", ".join(product["name"] for product in active)
+            outdated = [product["name"] for product in active if not product["up_to_date"]]
+            detail = f"{names}: real-time protection on, " + (f"signatures out of date ({', '.join(outdated)})" if outdated else "signatures up to date")
+            return {"available": True, "enabled": True, "detail": detail}
         output = _run(["powershell", "-NoProfile", "-Command", "Get-MpComputerStatus | ConvertTo-Json -Compress"])
         if not output:
             return {"available": False, "enabled": None, "detail": "Windows Defender status unavailable (a third-party antivirus may be active instead)"}
@@ -65,7 +95,10 @@ def get_antivirus_status():
         except (TypeError, ValueError, json.JSONDecodeError):
             return {"available": False, "enabled": None, "detail": "Could not parse Windows Defender status"}
         enabled = bool(data.get("AntivirusEnabled")) and bool(data.get("RealTimeProtectionEnabled"))
-        return {"available": True, "enabled": enabled, "detail": f"Real-time protection {'on' if data.get('RealTimeProtectionEnabled') else 'off'}, signatures {data.get('AntivirusSignatureAge', 'unknown')} day(s) old"}
+        # 65535 is Defender's "never updated / not running" placeholder, not a real age.
+        age = data.get("AntivirusSignatureAge")
+        age_text = "signature age unknown" if age in (None, 65535) else f"signatures {age} day(s) old"
+        return {"available": True, "enabled": enabled, "detail": f"Windows Defender real-time protection {'on' if data.get('RealTimeProtectionEnabled') else 'off'}, {age_text}"}
     if system == "Darwin":
         return {"available": True, "enabled": True, "detail": "macOS includes built-in XProtect malware signatures; no user action needed"}
     if system == "Linux":

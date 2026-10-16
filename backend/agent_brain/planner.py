@@ -6,13 +6,15 @@
    within seconds (see findings.py). "instant" mode stops here.
 3. Investigate (deep mode, or fast mode without a matching playbook): the LLM calls
    further read-only tools until it has enough evidence.
-4. Report: one JSON-mode call turns evidence + findings into root cause + fixes,
-   where fixes may only reference allow-listed remediation tools.
-5. Fix (on operator click, or automatically up to AUTO_FIX_MAX_RISK) and re-verify:
-   by rules when the fix targeted a finding, otherwise by the LLM.
+4. Report: one JSON-mode call (with deep thinking, streamed live) turns evidence + findings +
+   the model's own IT knowledge into a root cause and 3-4 ranked solutions. A solution may name an
+   allow-listed remediation tool, which makes it runnable after a person approves it.
+5. Fix: ONLY when a person approves a solution in the dashboard. There is no automatic path.
+   Then re-verify: by rules when the fix targeted a finding, otherwise by the LLM.
 
-The LLM can never execute a fix itself: during investigation it only sees
-read-risk tool schemas, and every proposed fix is validated against the registry.
+The LLM can never execute a fix itself: during investigation it only sees read-risk tool schemas,
+every proposed fix is validated against the registry, and every diagnosis and every approval or
+rejection is written to the decisions folder (backend/decision_log.py).
 """
 
 import asyncio
@@ -26,13 +28,15 @@ from agent.toolkit import get_tool, list_tools, risk_rank, tool_schemas
 from agent.toolkit.registry import validate_args
 from agent.toolkit.remediation import PROTECTED_PROCESSES, RESTARTABLE_SERVICES
 
+from .. import decision_log
 from ..alert_store import get_alerts
 from ..learning import model_builder
 from ..learning import store as learning_store
 from ..llm import LLMUnavailableError, get_provider
+from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
 from . import events, findings, session_store
 from .executor import execute, resolve_target
-from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, match_playbook
+from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, match_playbook, playbook_tips
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,14 @@ REPORT_EVIDENCE_CHARS = 700
 MAX_CALLS_PER_TURN = 3
 # Output cap for the report / verify calls: generation is the slowest part on a CPU.
 REPORT_MAX_TOKENS = 450
+# With deep thinking the reasoning tokens count toward the cap, so the report gets far more room.
+REPORT_THINKING_MAX_TOKENS = 1400
+# When thinking used the whole budget before the JSON was written, a short no-thinking call turns the
+# reasoning into the answer (instead of throwing minutes of reasoning away).
+REASONING_HANDOFF_CHARS = 3000
+RISKS = ("low", "medium", "high")
+# Tool calls are short; without a cap a slow model can ramble past the deadline.
+INVESTIGATE_MAX_TOKENS = 300
 VERIFY_MAX_TOKENS = 300
 # instant: rules only (seconds, no AI) / fast: baseline + one AI call / deep: AI investigates further.
 MODES = ("instant", "fast", "deep")
@@ -51,6 +63,7 @@ CONFIDENCES = ("low", "medium", "high")
 _session_locks = {}
 
 INVESTIGATE_PROMPT = """You are AIops, an expert IT support technician remotely diagnosing a {os_type} computer.
+""" + BRAIN_PRINCIPLES + """
 Your job: find the ROOT CAUSE of the user's problem using the diagnostic tools provided.
 Rules:
 - Base every conclusion on tool output. Never invent numbers or facts.
@@ -62,21 +75,27 @@ Rules:
 # The evidence list and issue summary are built by the server, not generated: on a laptop CPU
 # every output token costs ~0.2 s, so the model only writes what needs judgement.
 REPORT_PROMPT = """You are AIops, a senior IT support technician. Write the final diagnosis for a {os_type} computer as JSON.
-Use ONLY the evidence provided. Explain in simple language a non-technical user understands.
+""" + BRAIN_PRINCIPLES + """
+Use the evidence first and your own IT knowledge second. Explain in simple language a non-technical user understands.
 If the evidence does NOT confirm the user's complaint (for example the disk has plenty of free space), say so plainly
-in root_cause, set confidence to "low", and do not propose fixes for a problem the evidence does not show.
+in root_cause and set confidence to "low".
+Only blame a finding for the complaint if it can really cause it (a full disk does not break DNS or websites;
+high memory does not cause a network outage). If the checks for the complaint passed, say they passed, mention
+other findings only as separate problems, and suggest what to check next.
 JSON schema:
 {{
   "root_cause": "1-2 sentences: the most likely root cause, citing the evidence",
   "confidence": "low|medium|high",
   "severity": "low|medium|high|critical",
-  "proposed_fixes": [{{"tool_id": "<fix tool id>", "args": {{}}, "why": "at most 12 words"}}],
-  "manual_steps": ["short step the user must do by hand, if any"]
+  "solutions": [
+    {{"title": "short action", "why": "one sentence: why this helps", "steps": ["concrete step", "..."], "risk": "low|medium|high", "tool_id": "<fix tool id, or null>", "args": {{}}}}
+  ]
 }}
-proposed_fixes may ONLY use these fix tools (id, risk, description, params). Use [] if none applies; never suggest kill_process for system processes.
-If one of these tools can do a step for the user (e.g. flushing DNS), put it in proposed_fixes, NOT in manual_steps:
-{fix_catalog}
-Be brief: at most 3 manual steps."""
+Keep your private reasoning short and focused (a few hundred words), then write the JSON.
+Give 3 or 4 genuinely different solutions, best first. Set tool_id ONLY when one of these tools performs the
+solution (the user must still approve it); otherwise use null and write the steps the user follows by hand.
+Never suggest kill_process for system processes. Available fix tools (id, risk, description, params):
+{fix_catalog}"""
 
 # Small models often write a fix as a manual instruction ("run ipconfig /flushdns").
 # These patterns turn such steps into one-click fixes when a matching tool exists.
@@ -94,13 +113,14 @@ MANUAL_STEP_FIXES = (
 )
 
 VERIFY_PROMPT = """You are AIops, an IT technician verifying whether a fix worked on a {os_type} computer.
+""" + BRAIN_PRINCIPLES + """
 Compare the original diagnosis with the fresh evidence collected after the fix. Reply as JSON:
 {{"resolved": true|false, "explanation": "plain-language verdict citing the fresh evidence", "next_steps": ["..."]}}"""
 
 
-def auto_fix_max_risk():
-    value = os.getenv("AUTO_FIX_MAX_RISK", "none").strip().lower()
-    return value if value in ("low", "medium", "high") else None
+def diagnosis_thinking():
+    """Deep thinking for the diagnosis report (the decision that matters). On by default."""
+    return os.getenv("DIAGNOSIS_THINKING", "true").strip().lower() in ("1", "true", "yes")
 
 
 def max_investigation_steps():
@@ -196,7 +216,7 @@ def fix_catalog(os_type, only=None):
     `only` limits the catalog (e.g. to a playbook's relevant fixes) to keep the prompt short."""
     lines = []
     for item in list_tools(os_type, max_risk="high", min_risk="low"):
-        if only and item.id not in only:
+        if (only and item.id not in only) or not item.ai_visible:
             continue
         params = ", ".join(f"{name}: {spec.get('type')}" for name, spec in item.params.items())
         summary = item.description.split(". ")[0].rstrip(".")
@@ -220,7 +240,7 @@ def validate_fixes(raw_fixes, os_type):
         if not isinstance(raw, dict):
             continue
         item = get_tool(str(raw.get("tool_id", "")).strip())
-        if item is None or item.risk == "read" or os_type not in item.os:
+        if item is None or item.risk == "read" or os_type not in item.os or not item.ai_visible:
             continue
         try:
             args = validate_args(item, raw.get("args") or {})
@@ -236,13 +256,19 @@ def validate_fixes(raw_fixes, os_type):
     return fixes
 
 
+def _offerable_without_args(item, os_type):
+    """A fix tool that may become a one-click solution without arguments: a real change tool for this OS that
+    the AI is allowed to propose (actions only a person starts, like installing OS updates, never qualify)."""
+    return item is not None and item.risk != "read" and item.ai_visible and os_type in item.os and not item.required
+
+
 def promote_manual_steps(manual_steps, fixes, os_type):
     """Turn manual instructions that a fix tool can perform into proposed fixes."""
     remaining, present = [], {fix["tool_id"] for fix in fixes}
     for step in manual_steps:
         tool_id = next((tool_id for pattern, tool_id in MANUAL_STEP_FIXES if pattern.search(step)), None)
         item = get_tool(tool_id) if tool_id else None
-        if item is None or os_type not in item.os or item.required:
+        if not _offerable_without_args(item, os_type):
             remaining.append(step)
             continue
         if tool_id not in present:
@@ -251,15 +277,121 @@ def promote_manual_steps(manual_steps, fixes, os_type):
     return remaining, fixes
 
 
+def _fix_key(item):
+    return (item.get("tool_id"), json.dumps(item.get("args") or {}, sort_keys=True))
+
+
+def _steps(value):
+    if isinstance(value, str):
+        value = [line.strip(" -*0123456789.)") for line in value.splitlines()]
+    return [str(step).strip()[:300] for step in (value if isinstance(value, list) else []) if str(step).strip()][:6]
+
+
+def normalize_solutions(raw_solutions, os_type):
+    """3-4 ranked solutions from the model. A tool_id survives only if the registry accepts it for this
+    OS; otherwise the solution stays manual (the user follows its steps by hand)."""
+    solutions = []
+    for entry in raw_solutions if isinstance(raw_solutions, list) else []:
+        if isinstance(entry, str):
+            entry = {"title": entry}
+        if not isinstance(entry, dict):
+            continue
+        title = " ".join(str(entry.get("title") or entry.get("action") or entry.get("name") or "").split())[:160]
+        if not title:
+            continue
+        tool_id = str(entry.get("tool_id") or "").strip()
+        fix = None
+        if tool_id and tool_id.lower() not in ("null", "none"):
+            valid = validate_fixes([{"tool_id": tool_id, "args": entry.get("args") or {}, "why": entry.get("why", "")}], os_type)
+            fix = valid[0] if valid else None
+        if fix and any(item["tool_id"] == fix["tool_id"] and item["args"] == fix["args"] for item in solutions):
+            continue  # the same runnable fix twice
+        if fix is None:
+            # Title only: a tool named in a later step ("if that fails, reset winsock") must not turn a
+            # card titled "Update the network driver" into a one-click button for something else.
+            promoted = next((tool for pattern, tool in MANUAL_STEP_FIXES if pattern.search(title)), None)
+            item = get_tool(promoted) if promoted else None
+            if _offerable_without_args(item, os_type) and not any(existing["tool_id"] == promoted for existing in solutions):
+                fix = {"tool_id": item.id, "args": {}, "risk": item.risk}
+        risk = str(entry.get("risk") or "low").lower()
+        solutions.append({
+            "title": title,
+            "why": " ".join(str(entry.get("why") or entry.get("reason") or "").split())[:500],
+            "steps": _steps(entry.get("steps")),
+            "risk": fix["risk"] if fix else (risk if risk in RISKS else "low"),
+            "tool_id": fix["tool_id"] if fix else None,
+            "args": fix["args"] if fix else {},
+            "source": "ai",
+            "status": "suggested",
+        })
+        if len(solutions) >= MAX_SOLUTIONS:
+            break
+    return solutions
+
+
+def _solution_from_fix(fix):
+    tool = get_tool(fix["tool_id"])
+    return {
+        "title": (tool.description.split(". ")[0].rstrip(".") if tool else fix["tool_id"])[:160],
+        "why": fix.get("why") or "",
+        "steps": [],
+        "risk": fix["risk"],
+        "tool_id": fix["tool_id"],
+        "args": fix.get("args") or {},
+        "source": "learned" if fix.get("learned") else "rule" if fix.get("rule") else "ai",
+        "status": "suggested",
+    }
+
+
+def complete_solutions(report, playbook):
+    """Top the solutions up to 3-4: first with runnable fixes the rules or past tickets proposed, then with
+    safe manual tips for this kind of problem. Never more than MAX_SOLUTIONS."""
+    solutions = list(report.get("solutions") or [])
+    keys = {_fix_key(item) for item in solutions if item.get("tool_id")}
+    for fix in report.get("proposed_fixes") or []:
+        if len(solutions) >= MAX_SOLUTIONS:
+            break
+        if _fix_key(fix) not in keys:
+            keys.add(_fix_key(fix))
+            solutions.append(_solution_from_fix(fix))
+    titles = {item["title"].lower() for item in solutions}
+    for tip in playbook_tips(playbook):
+        if len(solutions) >= MIN_SOLUTIONS:
+            break
+        if tip["title"].lower() not in titles:
+            titles.add(tip["title"].lower())
+            solutions.append({**tip, "steps": list(tip["steps"]), "tool_id": None, "args": {}, "source": "playbook", "status": "suggested"})
+    report["solutions"] = solutions[:MAX_SOLUTIONS]
+    return report
+
+
+def link_solutions(report):
+    """Point each runnable solution at its entry in proposed_fixes (the list the approval endpoint uses).
+    A solution whose fix was filtered out becomes manual."""
+    index = {_fix_key(fix): position for position, fix in enumerate(report.get("proposed_fixes") or [])}
+    for solution in report.get("solutions") or []:
+        position = index.get(_fix_key(solution)) if solution.get("tool_id") else None
+        solution["fix_index"] = position
+        if position is None:
+            solution["tool_id"], solution["args"] = None, {}
+    return report
+
+
 def normalize_report(raw, issue, os_type, fallback_note=None):
     severity = str(raw.get("severity", "medium")).lower()
     confidence = str(raw.get("confidence", "medium")).lower()
+    solutions = normalize_solutions(raw.get("solutions"), os_type)
+    solution_fixes = [{"tool_id": item["tool_id"], "args": item["args"], "why": item["why"] or item["title"]} for item in solutions if item["tool_id"]]
     manual_steps, fixes = promote_manual_steps(
-        [str(item)[:400] for item in (raw.get("manual_steps") or [])][:10],
-        validate_fixes(raw.get("proposed_fixes"), os_type),
+        [str(item)[:400] for item in (raw.get("manual_steps") or [])][:10] + [item["title"] for item in solutions if not item["tool_id"]],
+        validate_fixes(list(raw.get("proposed_fixes") or []) + solution_fixes, os_type),
         os_type,
     )
+    if not solutions:
+        # Rule-based or older reports: their manual steps become solutions too.
+        solutions = [{"title": step[:160], "why": "", "steps": [], "risk": "low", "tool_id": None, "args": {}, "source": "rule", "status": "suggested"} for step in manual_steps][:MAX_SOLUTIONS]
     return {
+        "solutions": solutions,
         "issue_summary": str(raw.get("issue_summary") or issue)[:500],
         "root_cause": str(raw.get("root_cause") or fallback_note or "The agent could not determine a root cause from the evidence.")[:1500],
         "confidence": confidence if confidence in CONFIDENCES else "medium",
@@ -285,7 +417,7 @@ def add_learned_fixes(report, learned, os_type):
     present = {fix["tool_id"] for fix in report["proposed_fixes"]}
     for item in learned:
         tool = get_tool(item["tool_id"])
-        if tool is None or item["tool_id"] in present or os_type not in tool.os or tool.required:
+        if not _offerable_without_args(tool, os_type) or item["tool_id"] in present:
             continue
         report["proposed_fixes"].append({
             "tool_id": tool.id, "args": {}, "risk": tool.risk, "description": tool.description,
@@ -296,7 +428,7 @@ def add_learned_fixes(report, learned, os_type):
 
 
 async def learn_from(session_id):
-    """Record the session as a learned case and rebuild the sentinel-tech model when due."""
+    """Record the session as a learned case and rebuild the aiops-brain model when due."""
     try:
         session = session_store.get_session(session_id, include_steps=False)
         if session and session.get("report"):
@@ -321,8 +453,36 @@ def _summary_block(evidence):
     return "\n".join(f"- {tool_id}{' ' + json.dumps(args) if args else ''}: {'' if result.get('ok') else '(failed) '}{(result.get('summary') or '')[:300]}" for tool_id, args, result in evidence)
 
 
+def ai_call_timeout(deep=False):
+    """Deadline for one AI call during a diagnosis; past it the user gets the rule-based diagnosis instead
+    of waiting for a model that is swapping. Deep-thinking calls get a longer deadline (they reason first)."""
+    name, default = ("AGENT_AI_TIMEOUT_SECONDS_DEEP", "900") if deep else ("AGENT_AI_TIMEOUT_SECONDS", "300")
+    try:
+        return max(30, int(os.getenv(name, default)))
+    except ValueError:
+        return int(default)
+
+
 async def _chat(messages, **kwargs):
+    kwargs.setdefault("timeout", ai_call_timeout(deep=bool(kwargs.get("think"))))
     return await asyncio.to_thread(get_provider().chat, messages, **kwargs)
+
+
+def _thinking_publisher(session_id):
+    """on_delta callback for a streamed AI call: forwards the model's reasoning to the session view about
+    every 1.5 s. It runs in the provider's worker thread, so events are handed to the event loop."""
+    loop = asyncio.get_running_loop()
+    state = {"thinking": "", "content": "", "last": 0.0}
+
+    def on_delta(kind, piece):
+        state[kind] += piece
+        now = time.monotonic()
+        if now - state["last"] >= 1.5:
+            state["last"] = now
+            event = {"type": "thinking", "thinking": state["thinking"][-1500:], "chars": len(state["thinking"]), "writing": bool(state["content"])}
+            loop.call_soon_threadsafe(events.publish, session_id, event)
+
+    return on_delta
 
 
 def _warm_up():
@@ -380,7 +540,9 @@ def _rule_based_report(found, issue, os_type, note=None):
     return report
 
 
-async def run_diagnosis(session_id, mode=None):
+async def run_diagnosis(session_id, mode=None, preset_evidence=None):
+    """preset_evidence: [(tool_id, args, result)] that already ran (e.g. the Performance tab's full test);
+    the diagnosis then starts from those results instead of running the baseline checks again."""
     session = session_store.get_session(session_id, include_steps=False)
     target = resolve_target(session["device_id"])
     if target is None:
@@ -389,7 +551,7 @@ async def run_diagnosis(session_id, mode=None):
         return
     async with _lock(session_id):
         try:
-            await _diagnose(session, target, normalize_mode(mode))
+            await _diagnose(session, target, normalize_mode(mode), preset_evidence)
         except LLMUnavailableError as error:
             logger.warning("Troubleshoot %s: LLM unavailable: %s", session_id, error)
             session_store.update_session(session_id, status="failed", error=str(error))
@@ -398,11 +560,21 @@ async def run_diagnosis(session_id, mode=None):
             logger.exception("Troubleshoot session %s failed", session_id)
             session_store.update_session(session_id, status="failed", error=f"{type(error).__name__}: {error}")
             events.publish(session_id, {"type": "error", "message": "The troubleshooting agent hit an internal error. See server logs."})
-    await _auto_fix(session_id)
+    # Suggest-only: nothing is applied here. A person approves solutions in the dashboard.
     await learn_from(session_id)
 
 
-async def _diagnose(session, target, mode):
+def _record_preset(session_id, preset_evidence):
+    """Show checks that ran before the session as its steps, so the session view and the AI see them."""
+    evidence = []
+    for tool_id, args, result in preset_evidence:
+        step = session_store.add_step(session_id, "tool", tool_id, args, result)
+        events.publish(session_id, {"type": "step", "step": step})
+        evidence.append((tool_id, args, result))
+    return evidence
+
+
+async def _diagnose(session, target, mode, preset_evidence=None):
     session_id, issue = session["session_id"], session["issue"]
     started = time.perf_counter()
     note = None
@@ -417,10 +589,14 @@ async def _diagnose(session, target, mode):
     warm_up = asyncio.create_task(asyncio.to_thread(_warm_up)) if mode != "instant" else None
 
     playbook = get_playbook(session.get("playbook_id")) or match_playbook(issue)
-    _publish_status(session_id, "running", f"Running checks on {target.label} in parallel")
-    if playbook:
-        _think(session_id, f"Using the '{playbook['title']}' playbook for the baseline checks ({mode} mode).")
-    evidence = await collect_baseline(session_id, target, playbook)
+    if preset_evidence:
+        _think(session_id, f"Starting from the {len(preset_evidence)} checks that just ran on {target.label} ({mode} mode).")
+        evidence = _record_preset(session_id, preset_evidence)
+    else:
+        _publish_status(session_id, "running", f"Running checks on {target.label} in parallel")
+        if playbook:
+            _think(session_id, f"Using the '{playbook['title']}' playbook for the baseline checks ({mode} mode).")
+        evidence = await collect_baseline(session_id, target, playbook)
     found = findings.analyze(evidence, target.os_type)
     _record_findings(session_id, found)
     evidence_seconds = time.perf_counter() - started
@@ -430,15 +606,18 @@ async def _diagnose(session, target, mode):
         report, similar = _rule_based_report(found, issue, target.os_type, note), []
     else:
         report, similar = await _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up)
+    report = ground_root_cause(report, playbook, found, evidence)
     report = add_learned_fixes(report, learned_fixes, target.os_type)
     report = add_rule_fixes(report, found, target.os_type)
     report["proposed_fixes"] = ground_fixes(filter_relevant_fixes(report["proposed_fixes"], playbook), report, found, playbook)
     report["similar_cases"] = [{"session_id": case["session_id"], "issue": case["issue"][:160], "root_cause": (case.get("effective_root_cause") or "")[:240], "outcome": case["outcome"]} for case in similar]
     report["quick_findings"] = found
     report["mode"] = mode
+    link_solutions(complete_solutions(report, playbook))
     total = time.perf_counter() - started
     report["timing"] = {"evidence_seconds": round(evidence_seconds, 1), "ai_seconds": round(total - evidence_seconds, 1), "total_seconds": round(total, 1)}
     session_store.update_session(session_id, status="diagnosed", report=report)
+    await asyncio.to_thread(_record_diagnosis, session, target, report, found)
     events.publish(session_id, {"type": "report", "report": report})
     _publish_status(session_id, "diagnosed", f"Diagnosis ready in {total:.0f}s")
 
@@ -457,9 +636,13 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
     notes = ""
     rounds = investigation_rounds(mode, playbook)
     if rounds:
-        notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds)
+        try:
+            notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds)
+        except LLMUnavailableError as error:
+            # The model is too slow right now; another call would fail the same way, so answer from the rules.
+            logger.warning("Troubleshoot %s: investigation failed, using rules: %s", session_id, error)
+            return _rule_based_report(found, issue, target.os_type, f"AI did not answer in time, instant rule-based diagnosis: {error}"), similar
 
-    _publish_status(session_id, "running", "AI is writing the diagnosis")
     only = RELEVANT_FIXES.get((playbook or {}).get("id")) if mode == "fast" else None
     evidence_text = _summary_block(evidence) if mode == "fast" else _evidence_block(evidence, REPORT_EVIDENCE_CHARS)
     # Small models invent a cause when nothing is wrong; say so explicitly when the checks are clean.
@@ -468,17 +651,84 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
         {"role": "system", "content": REPORT_PROMPT.format(os_type=target.os_type, fix_catalog=fix_catalog(target.os_type, only) or "- none")},
         {"role": "user", "content": f"User's problem: {issue}\n\nAutomatic findings (already verified by rules):\n{found_block}\n\nEvidence:\n{evidence_text}\n\nInvestigator notes: {notes or 'none'}{past_cases}{clean}"},
     ]
+    thinking = diagnosis_thinking()
+    _publish_status(session_id, "running", "AI is thinking deeply about the diagnosis" if thinking else "AI is writing the diagnosis")
     try:
-        reply = await _chat(report_messages, json_mode=True, max_tokens=REPORT_MAX_TOKENS)
+        reply = await _chat(report_messages, json_mode=True, max_tokens=REPORT_THINKING_MAX_TOKENS if thinking else REPORT_MAX_TOKENS,
+                            think=thinking, on_delta=_thinking_publisher(session_id))
     except LLMUnavailableError as error:
         # A slow or crashed model must not throw away the evidence already collected.
         logger.warning("Troubleshoot %s: report call failed, using rules: %s", session_id, error)
         return _rule_based_report(found, issue, target.os_type, f"AI did not answer, instant rule-based diagnosis: {error}"), similar
     raw = _parse_json(reply["content"])
+    if not raw.get("root_cause") and reply.get("thinking"):
+        # Thinking ran out of budget before the answer: hand the reasoning to a quick call that only writes it up.
+        _publish_status(session_id, "running", "AI is writing the diagnosis from its reasoning")
+        handoff = report_messages + [{"role": "user", "content": "Your reasoning so far:\n" + reply["thinking"][-REASONING_HANDOFF_CHARS:]
+                                       + "\n\nNow write ONLY the final JSON answer in the schema above, with 3 or 4 solutions."}]
+        try:
+            written = await _chat(handoff, json_mode=True, max_tokens=REPORT_MAX_TOKENS + 150, think=False)
+            raw = _parse_json(written["content"])
+        except LLMUnavailableError as error:
+            logger.warning("Troubleshoot %s: write-up after thinking failed: %s", session_id, error)
     if not raw.get("root_cause"):
-        return _rule_based_report(found, issue, target.os_type, "AI returned no usable diagnosis; showing the instant rule-based diagnosis"), similar
+        report = _rule_based_report(found, issue, target.os_type, "AI returned no usable diagnosis; showing the instant rule-based diagnosis")
+        # Keep what the AI did try, so the decision record shows it.
+        report["ai"] = {"model": reply.get("model"), "thinking": bool(reply.get("thought")), "prompt_hash": decision_log.prompt_hash(report_messages), "fallback": True}
+        report["reasoning"] = (reply.get("thinking") or "")[-3000:]
+        return report, similar
     raw.setdefault("evidence", evidence_facts(found, evidence))
-    return normalize_report(raw, issue, target.os_type, fallback_note=notes), similar
+    report = normalize_report(raw, issue, target.os_type, fallback_note=notes)
+    report["ai"] = {"model": reply.get("model"), "thinking": bool(reply.get("thought")), "prompt_hash": decision_log.prompt_hash(report_messages)}
+    report["reasoning"] = (reply.get("thinking") or "")[-3000:]
+    return report, similar
+
+
+NETWORK_PLAYBOOKS = {"no_internet", "wifi_drops"}
+
+
+def ground_root_cause(report, playbook, found, evidence):
+    """Small models blame whatever finding they see for the complaint (e.g. "a full disk breaks
+    DNS"), even when told not to. When the checks for a network complaint passed and found
+    nothing network-related, say that plainly and list other findings as separate problems."""
+    if (playbook or {}).get("id") not in NETWORK_PLAYBOOKS or any(item["key"].startswith(("net_", "wifi_")) for item in found):
+        return report
+    summaries = {tool_id: str(result.get("summary") or "") for tool_id, _, result in evidence if result.get("ok")}
+    # Judge by the real traffic tests, not the summary line: older agents can write a wrong summary
+    # (e.g. "DHCP failed" because of a virtual adapter) while DNS, TCP and HTTP all work.
+    stages = next((result.get("data") or {} for tool_id, _, result in evidence if tool_id == "check_internet" and result.get("ok")), {})
+    online = all((stages.get(stage) or {}).get("ok") for stage in ("dns_resolution", "tcp_to_internet", "http")) if stages else False
+    if not (online or summaries.get("check_internet", "").startswith("Internet connectivity works")):
+        return report
+    if online and not summaries["check_internet"].startswith("Internet connectivity works"):
+        summaries["check_internet"] = "DNS, TCP and HTTP tests to the internet all succeeded"
+    wifi = f"; {summaries['wifi_status'].rstrip('.')}" if summaries.get("wifi_status") else ""
+    others = [item["title"] for item in found]
+    report["ai_root_cause"] = report.get("root_cause")
+    report["root_cause_source"] = "rules: the network checks for this complaint passed"
+    report["complaint_reproduced"] = False
+    report["root_cause"] = (
+        f"The network checks passed ({summaries['check_internet'].rstrip('.')}{wifi}). The problem did not show up during the check, "
+        "so it may be intermittent or limited to certain websites."
+        + (f" Separate problems found: {', '.join(others)}." if others else "")
+    )
+    report["confidence"] = "low"
+    return report
+
+
+def _record_diagnosis(session, target, report, found):
+    ai = report.get("ai") or {}
+    kind = "performance_analysis" if session.get("playbook_id") == "performance" else "diagnosis"
+    decision_log.record(kind, session["session_id"], {
+        "device": target.label, "device_id": target.device_id, "os_type": target.os_type, "issue": session["issue"],
+        "mode": report.get("mode"), "model": ai.get("model"), "thinking": ai.get("thinking", False), "prompt_hash": ai.get("prompt_hash"),
+        "root_cause": report.get("root_cause"), "root_cause_source": report.get("root_cause_source") or ("ai" if ai.get("model") and not ai.get("fallback") else "rules"),
+        "ai_root_cause": report.get("ai_root_cause"), "confidence": report.get("confidence"), "severity": report.get("severity"),
+        "solutions": [{key: item.get(key) for key in ("title", "why", "steps", "risk", "tool_id", "source")} for item in report.get("solutions") or []],
+        "findings": [item["title"] for item in found], "evidence": report.get("evidence"),
+        "reasoning_summary": (report.get("reasoning") or "")[-1500:], "timing": report.get("timing"),
+        "approved_by": None, "note": "Suggestions only: nothing was changed on the device.",
+    })
 
 
 def evidence_facts(found, evidence, limit=8):
@@ -499,7 +749,8 @@ async def _investigate(session_id, target, issue, evidence, found_block, alert_l
     executed = {(tool_id, json.dumps(args, sort_keys=True)) for tool_id, args, _ in evidence}
     _publish_status(session_id, "running", "AI is investigating")
     for _ in range(rounds):
-        reply = await _chat(messages, tools=schemas)
+        # Picking the next check is simple; deep thinking is kept for the final diagnosis.
+        reply = await _chat(messages, tools=schemas, max_tokens=INVESTIGATE_MAX_TOKENS, think=False)
         calls = reply["tool_calls"] or parse_inline_tool_calls(reply["content"], allowed)
         if not calls:
             _think(session_id, reply["content"])
@@ -527,16 +778,6 @@ async def _investigate(session_id, target, issue, evidence, found_block, alert_l
     return ""
 
 
-async def _auto_fix(session_id):
-    limit = auto_fix_max_risk()
-    session = session_store.get_session(session_id, include_steps=False)
-    if not limit or not session or session["status"] != "diagnosed":
-        return
-    for index, fix in enumerate((session["report"] or {}).get("proposed_fixes", [])):
-        if risk_rank(fix["risk"]) <= risk_rank(limit):
-            await apply_fix(session_id, index, approved_by="auto")
-
-
 async def apply_fix(session_id, index, approved_by="operator"):
     async with _lock(session_id):
         session = session_store.get_session(session_id, include_steps=False)
@@ -547,15 +788,20 @@ async def apply_fix(session_id, index, approved_by="operator"):
         fix = fixes[index]
         if fix["status"] in ("running", "applied"):
             return fix
+        if any(item.get("fix_index") == index and item.get("status") in ("rejected", "done") for item in report.get("solutions") or []):
+            raise ValueError("This solution was rejected or done by hand; it will not be run")
         target = resolve_target(session["device_id"])
         if target is None:
             raise ValueError("Device no longer exists")
 
         fix["status"] = "running"
+        _set_solution_status(report, index, "running")
         session_store.update_session(session_id, status="fixing", report=report)
         events.publish(session_id, {"type": "fix", "index": index, "fix": fix})
+        await asyncio.to_thread(decision_log.record, "fix_approved", session_id, {"device": target.label, "device_id": target.device_id, "action": fix["tool_id"], "args": fix["args"], "risk": fix["risk"], "approved_by": approved_by})
         result = await _run_step(session_id, target, fix["tool_id"], fix["args"], max_risk="high", kind="fix")
         fix["status"], fix["result"] = ("applied" if result.get("ok") else "failed"), result
+        _set_solution_status(report, index, fix["status"])
         session_store.add_audit(session_id, target.device_id, fix["tool_id"], fix["args"], approved_by, result.get("ok"), result.get("summary"))
         session_store.update_session(session_id, status="fixing", report=report)
         events.publish(session_id, {"type": "fix", "index": index, "fix": fix})
@@ -564,8 +810,40 @@ async def apply_fix(session_id, index, approved_by="operator"):
             await _verify(session, target, report, fix)
         else:
             _publish_status(session_id, "diagnosed", "Fix failed; see the result")
+            await asyncio.to_thread(decision_log.record, "fix_result", session_id, {
+                "device": target.label, "device_id": target.device_id, "action": fix["tool_id"], "result": result.get("summary"),
+                "verdict": "The fix failed on the device", "resolved": False, "method": "none"})
     await learn_from(session_id)
     return fix
+
+
+def _set_solution_status(report, fix_index, status):
+    for solution in report.get("solutions") or []:
+        if solution.get("fix_index") == fix_index:
+            solution["status"] = status
+
+
+async def decide_solution(session_id, index, decision, decided_by="operator"):
+    """A person marks a suggested solution as done by hand, or rejects it. Recorded, never executed."""
+    if decision not in ("done", "rejected"):
+        raise ValueError("decision must be 'done' or 'rejected'")
+    async with _lock(session_id):
+        session = session_store.get_session(session_id, include_steps=False)
+        report = (session or {}).get("report") or {}
+        solutions = report.get("solutions") or []
+        if not 0 <= index < len(solutions):
+            raise ValueError("Unknown solution")
+        solution = solutions[index]
+        if solution.get("status") in ("running", "applied"):
+            raise ValueError(f"This solution is already {solution['status']}")
+        solution["status"] = decision
+        session_store.update_session(session_id, report=report)
+        events.publish(session_id, {"type": "solution", "index": index, "solution": solution})
+    await asyncio.to_thread(decision_log.record, "fix_done_manually" if decision == "done" else "fix_rejected", session_id, {
+        "device": session.get("device_label"), "device_id": session.get("device_id"), "action": solution["title"],
+        "tool_id": solution.get("tool_id"), "approved_by": decided_by if decision == "done" else None, "decided_by": decided_by,
+    })
+    return solution
 
 
 async def _verify(session, target, report, fix):
@@ -598,12 +876,20 @@ async def _verify(session, target, report, fix):
             reply = await _chat([
                 {"role": "system", "content": VERIFY_PROMPT.format(os_type=target.os_type)},
                 {"role": "user", "content": f"Problem: {session['issue']}\nOriginal root cause: {report['root_cause']}\nFix applied: {fix['tool_id']} -> {fix['result'].get('summary')}\n\nFresh evidence:\n{_evidence_block(evidence, REPORT_EVIDENCE_CHARS)}"},
-            ], json_mode=True, max_tokens=VERIFY_MAX_TOKENS)
+            ], json_mode=True, max_tokens=VERIFY_MAX_TOKENS, think=False)
             raw = _parse_json(reply["content"])
             verdict = {"resolved": bool(raw.get("resolved")), "explanation": str(raw.get("explanation", ""))[:1500], "next_steps": [str(item) for item in raw.get("next_steps", [])][:8], "after_fix": fix["tool_id"], "method": "ai"}
         except LLMUnavailableError as error:
             verdict = {"resolved": None, "explanation": f"Fix applied, but the AI could not verify it: {error}", "next_steps": [], "after_fix": fix["tool_id"], "method": "none"}
+    if report.get("complaint_reproduced") is False and verdict["resolved"]:
+        # Never let a fix "resolve" a complaint that never showed up: that would teach the AI a false lesson.
+        lead = ("The finding this fix targeted is cleared, but the reported problem did not show up in the checks before the fix, "
+                "so AIops cannot confirm it fixed that problem. ") if verdict["method"] == "rules" else (
+                "The fix ran, but the problem did not show up in the checks before it either, so AIops cannot confirm it fixed anything. ")
+        verdict.update(resolved=None, explanation=lead + verdict["explanation"])
     status = "resolved" if verdict["resolved"] else "diagnosed" if verdict["resolved"] is None else "unresolved"
     session_store.update_session(session_id, status=status, verify=verdict)
+    await asyncio.to_thread(decision_log.record, "fix_result", session_id, {"device": target.label, "device_id": target.device_id, "action": fix["tool_id"], "result": (fix.get("result") or {}).get("summary"),
+                                                   "verdict": verdict["explanation"], "resolved": verdict["resolved"], "method": verdict["method"]})
     events.publish(session_id, {"type": "verify", "verify": verdict})
     _publish_status(session_id, status, verdict["explanation"][:200])

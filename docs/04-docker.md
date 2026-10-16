@@ -1,7 +1,7 @@
 # Running AIops in Docker
 
 ```powershell
-python models/migrate_model.py qwen2.5:3b   # once: copy the model into models/qwen2.5-3b/
+python models/migrate_model.py qwen3:8b     # optional: copy the model into models/qwen3-8b/ (otherwise model-init pulls it)
 docker compose up -d --build
 ```
 

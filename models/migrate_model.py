@@ -1,15 +1,15 @@
 """Copy an installed Ollama model into a portable project folder named after the model.
 
-    python models/migrate_model.py qwen2.5:3b
+    python models/migrate_model.py qwen3:8b
 
-creates models/qwen2.5-3b/ with:
+creates models/qwen3-8b/ with:
     model.gguf   the weights (copied from the local Ollama store)
     Modelfile    FROM ./model.gguf plus the original template, system prompt and parameters
     LICENSE      the model's license text (redistribution requires it)
     model.json   name, size and sha256 of the weights
 
 Any machine (or the Docker `ollama` service) can then recreate the exact model with:
-    ollama create qwen2.5:3b -f models/qwen2.5-3b/Modelfile
+    ollama create qwen3:8b -f models/qwen3-8b/Modelfile
 """
 
 import hashlib
@@ -78,5 +78,5 @@ def migrate(model):
 
 
 if __name__ == "__main__":
-    for name in sys.argv[1:] or ["qwen2.5:3b"]:
+    for name in sys.argv[1:] or ["qwen3:8b"]:
         migrate(name)

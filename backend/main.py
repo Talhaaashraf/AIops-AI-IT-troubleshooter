@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,30 +17,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from agent.toolkit import TOOLKIT_VERSION, describe_tools
+from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import task_signals
+from . import decision_log, health_report, public_url, software_store, task_signals
 from .actions import run_action
 from .agent_brain import events as troubleshoot_events
+from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
-from .agent_brain.executor import LOCAL_DEVICE_ID, resolve_target
-from .agent_brain.planner import apply_fix, auto_fix_max_risk, default_mode, normalize_mode, run_diagnosis
-from .agent_brain.playbooks import public_playbooks
+from .agent_brain.executor import LOCAL_DEVICE_ID, execute, resolve_target
+from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, normalize_mode, run_diagnosis
+from .agent_brain.playbooks import get_playbook, public_playbooks
 from .learning import model_builder
 from .learning import store as learning_store
+from .llm import catalog as llm_catalog
 from .llm import get_provider as get_llm_provider
-from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, is_ai_available
+from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, is_ai_available, review_leftovers
 from .alert_store import add_alert, get_alerts
-from .auth import PUBLIC_PATH_PREFIXES, SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_session, session_token
+from .auth import SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_session, is_public_path, session_token
 from .collectors import collect_report
-from .device_store import create_pending_token, delete_device, get_device_by_token, get_latest_report, is_valid_install_token, list_devices, mark_offline_devices, register_device, save_report
+from .device_store import claim_onboarding, create_pending_token, delete_device, get_device, get_device_by_token, get_latest_report, is_valid_install_token, list_devices, mark_offline_devices, register_device, save_report, set_onboarding_session
 from .event_logs import collect_event_log_report
 from .performance_checks import collect_performance_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, list_tasks
 
-app = FastAPI(title="AIops Device Health Monitor")
+@asynccontextmanager
+async def lifespan(_app):
+    # start_monitor is defined further down; it is looked up when the server starts, not at import.
+    await start_monitor()
+    yield
+
+
+app = FastAPI(title="AIops Device Health Monitor", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -80,9 +90,20 @@ def require_admin(request):
 
 
 @app.middleware("http")
+async def revalidate_frontend_middleware(request: Request, call_next):
+    """Without this, browsers keep serving a cached dashboard for hours after an update, so new
+    features (e.g. the model switcher) do not appear. no-cache still allows cheap ETag 304s."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path == "/login" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
 async def dashboard_auth_middleware(request: Request, call_next):
     path = request.url.path
-    if not auth_enabled() or path.startswith(PUBLIC_PATH_PREFIXES):
+    if not auth_enabled() or is_public_path(path):
         return await call_next(request)
     if has_valid_session(request.cookies):
         return await call_next(request)
@@ -102,7 +123,8 @@ async def login_submit(request: Request):
     if not check_password(str(form.get("password", ""))):
         return RedirectResponse(url="/login?error=1", status_code=303)
     response = RedirectResponse(url="/", status_code=303)
-    response.set_cookie(SESSION_COOKIE_NAME, session_token(), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+    # Secure over https (ngrok); plain http on the LAN still needs a non-secure cookie to work.
+    response.set_cookie(SESSION_COOKIE_NAME, session_token(), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, secure=request.url.scheme == "https")
     return response
 
 
@@ -131,7 +153,6 @@ def snapshot_with_alerts(report):
     return report
 
 
-@app.on_event("startup")
 async def start_monitor():
     logger.info("Registered FastAPI routes:")
     for route in app.routes:
@@ -144,13 +165,42 @@ async def start_monitor():
     else:
         logger.warning("Dashboard login is disabled: set DASHBOARD_PASSWORD or ADMIN_API_KEY in .env to require sign-in.")
     session_store.mark_interrupted_sessions()
+    global main_loop
+    main_loop = asyncio.get_running_loop()
     status = ai_status()
     logger.info("AI provider: %s / %s - %s", status.get("provider"), status.get("model"), status.get("message"))
-    _spawn(asyncio.to_thread(warm_up_llm))
+    _spawn(asyncio.to_thread(prepare_ai, "startup"))
     asyncio.create_task(monitor_loop())
     asyncio.create_task(offline_loop())
     asyncio.create_task(security_loop())
     asyncio.create_task(event_log_loop())
+
+
+def prepare_ai(reason):
+    """Create or refresh the aiops-brain model for the selected base model, then load it into RAM."""
+    try:
+        info = model_builder.ensure_brain(reason)
+        if info:
+            logger.info("Built %s v%s on %s (%s)", info["model"], info["version"], info["base_model"], reason)
+            getattr(get_llm_provider(), "refresh", lambda: None)()
+    except Exception:
+        logger.warning("Could not prepare the aiops-brain model", exc_info=True)
+    warm_up_llm()
+
+
+def _ai_label(device_id):
+    target = resolve_target(device_id) if device_id else None
+    return target.label if target else device_id
+
+
+def _record_ai(kind, device_id, think, payload, used_ai=True):
+    """Decision-log entry for a one-shot AI answer (health analysis, log analysis, chat). Answers written
+    without the model (e.g. "no events to analyse") are recorded as rules, not credited to the AI."""
+    decision_log.record(kind, device_id or LOCAL_DEVICE_ID, {
+        "device": _ai_label(device_id or LOCAL_DEVICE_ID), "device_id": device_id or LOCAL_DEVICE_ID,
+        "model": getattr(get_llm_provider(), "model", None) if used_ai else None, "thinking": bool(think) and used_ai,
+        "source": "ai" if used_ai else "rules", "approved_by": None, **payload,
+    })
 
 
 def warm_up_llm():
@@ -296,15 +346,17 @@ async def event_logs_endpoint():
 
 
 @app.post("/api/diagnostics/logs/diagnose")
-def diagnose_event_logs_endpoint():
+def diagnose_event_logs_endpoint(think: bool = False):
     if not is_ai_available():
         raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
     if latest_event_log_report is None:
         raise HTTPException(status_code=404, detail="No event log data collected yet")
     try:
-        return diagnose_logs(latest_event_log_report)
+        result = diagnose_logs(latest_event_log_report, think=think)
     except (AIModelUnavailableError, AIUnavailableError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    _record_ai("log_analysis", LOCAL_DEVICE_ID, think, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")}, used_ai=result.get("source") != "rules")
+    return result
 
 
 @app.get("/api/alerts")
@@ -366,7 +418,410 @@ def agent_report(payload: dict, request: Request):
 
     timestamp = str(payload.get("timestamp") or datetime.now(timezone.utc).isoformat())
     save_report(device_id, timestamp, diagnostics_payload, payload.get("spike_detected", False))
+    if onboarding_enabled():
+        _ensure_onboarding(device)
     return {"accepted": True, "device_id": device_id, "alerts_created": len(alerts_for_report)}
+
+
+ONBOARDING_ISSUE = "Onboarding health check: full diagnosis of a newly connected device"
+main_loop = None
+onboarding_rechecked = set()  # devices whose onboarding was checked for restart damage since this server started
+
+
+def _ensure_onboarding(device):
+    """Start the onboarding check on a device's first report, and re-run it once if a server
+    restart cut it short (restarts mark running sessions failed, which would skip it forever)."""
+    device_id, session_id = device["device_id"], device.get("onboarding_session_id")
+    if not session_id:
+        if claim_onboarding(device_id, "starting") and not start_onboarding_check(device_id):
+            set_onboarding_session(device_id, None)  # retried on the next report
+        return
+    if device_id in onboarding_rechecked:
+        return
+    onboarding_rechecked.add(device_id)
+    session = session_store.get_session(session_id, include_steps=False) if session_id != "starting" else None
+    if session_id == "starting" or (session and session["status"] == "failed" and "server restart" in (session.get("error") or "")):
+        start_onboarding_check(device_id)
+
+
+def onboarding_enabled():
+    return os.getenv("ONBOARDING_CHECK", "true").strip().lower() in ("1", "true", "yes")
+
+
+def start_onboarding_check(device_id):
+    """Run a full check-up with AI on a device, recorded as its onboarding report. Called from the
+    report handler's worker thread, so the diagnosis is handed to the event loop."""
+    target = resolve_target(device_id)
+    if target is None or main_loop is None:
+        return None
+    session_id = session_store.create_session(target.device_id, target.label, target.os_type, ONBOARDING_ISSUE, "full_checkup")
+    set_onboarding_session(device_id, session_id)
+    main_loop.call_soon_threadsafe(lambda: _spawn(run_diagnosis(session_id, default_mode())))
+    logger.info("Onboarding check %s started for %s", session_id, device_id)
+    return session_id
+
+
+@app.get("/api/agents/{device_id}/onboarding")
+def onboarding_status(device_id: str):
+    device = get_device(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    session_id = device.get("onboarding_session_id")
+    session = session_store.get_session(session_id, include_steps=False) if session_id and session_id != "starting" else None
+    if not session:
+        return {"session_id": None, "status": "starting" if session_id else "none"}
+    report = session.get("report") or {}
+    return {
+        "session_id": session_id, "status": session["status"], "created_at": session.get("created_at"),
+        "root_cause": report.get("root_cause"), "severity": report.get("severity"), "confidence": report.get("confidence"),
+        "findings": [item.get("title") for item in report.get("quick_findings") or []][:8],
+        "fixes": len(report.get("proposed_fixes") or []), "manual_steps": len(report.get("manual_steps") or []),
+    }
+
+
+@app.post("/api/agents/{device_id}/onboarding")
+async def rerun_onboarding(device_id: str):
+    if not get_device(device_id):
+        raise HTTPException(status_code=404, detail="Device not found")
+    session_id = await asyncio.to_thread(start_onboarding_check, device_id)
+    if not session_id:
+        raise HTTPException(status_code=409, detail="Could not start the health check")
+    return {"session_id": session_id}
+
+
+# ============================================================================
+# Software tab: inventory, uninstall and update (long-running, so run as jobs)
+# ============================================================================
+
+software_jobs = {}
+SOFTWARE_JOBS_KEPT = 200
+# Tools whose result data the dashboard needs to show (the rest only report a summary).
+JOB_DATA_TOOLS = {"find_leftovers", "quarantine_leftovers", "restore_quarantine", "list_quarantine", "install_os_updates"}
+CANDIDATE_ID_PATTERN = re.compile(r"^c\d{1,3}$")
+SCAN_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
+BATCH_ID_PATTERN = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+OLD_AGENT_MESSAGE = "This device's agent is too old for software management. Re-run the install command from Add Agent on the device to update it."
+
+
+def _software_target(device_id, manage=False):
+    target = resolve_target(device_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if manage and target.is_local and os.getenv("SENTINEL_IN_DOCKER"):
+        raise HTTPException(status_code=400, detail="The server container's packages come from its Docker image: rebuild the image instead of changing them here.")
+    return target
+
+
+def _change_in_progress(device_id):
+    """What is changing this device right now (a Software/Performance job or an approved fix), or None.
+    The agent runs changes one at a time: a second one would wait behind the first, and the server could
+    report it as failed while the agent still runs it later."""
+    for job in list(software_jobs.values()):
+        if job["device_id"] == device_id and job["state"] == "running" and job.get("risk", "read") != "read":
+            return f"{job['action']} of {job['name']}"
+    for session in session_store.list_sessions(device_id, 20):
+        if session["status"] == "fixing":
+            return f"an approved fix for \"{session['issue'][:80]}\""
+    return None
+
+
+def _refuse_if_changing(device_id):
+    busy = _change_in_progress(device_id)
+    if busy:
+        raise HTTPException(status_code=409, detail=f"Wait until the {busy} on this device has finished: changes run one at a time.")
+
+
+def _start_software_job(target, action, name, tool_id, args, max_risk):
+    if max_risk != "read":
+        _refuse_if_changing(target.device_id)
+    finished = [job_id for job_id, job in list(software_jobs.items()) if job["state"] != "running"]
+    for job_id in finished[: max(0, len(software_jobs) - SOFTWARE_JOBS_KEPT + 1)]:
+        software_jobs.pop(job_id, None)
+    job = {"job_id": secrets.token_hex(8), "device_id": target.device_id, "device": target.label, "action": action, "name": name, "state": "running",
+           "risk": max_risk, "summary": None, "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None}
+    software_jobs[job["job_id"]] = job
+    _spawn(_run_software_job(job, target, tool_id, args, max_risk))
+    return job
+
+
+async def _run_software_job(job, target, tool_id, args, max_risk):
+    tool = get_tool(tool_id)
+    changes_device = tool is not None and tool.risk != "read"
+    if changes_device:
+        # Recorded before it runs: an OS update can take an hour, and a restart meanwhile must not leave a
+        # changed device without a record of who approved what.
+        await asyncio.to_thread(decision_log.record, "software_action", target.device_id, {
+            "device": target.label, "device_id": target.device_id, "action": f"{job['action']} {job['name']}", "tool_id": tool_id,
+            "args": args, "approved_by": "operator", "state": "approved", "job_id": job["job_id"]})
+    try:
+        result = await execute(target, tool_id, args, max_risk)
+    except Exception as error:  # the job must still finish in the dashboard
+        logger.exception("Software job %s failed", job["job_id"])
+        result = {"ok": False, "summary": f"{job['action']} failed: {error}"}
+    ok = bool(result.get("ok"))
+    summary = result.get("summary") or ""
+    if not ok and "Unknown or disallowed tool" in summary:
+        summary = OLD_AGENT_MESSAGE
+    if ok and tool_id == "installed_software":
+        await asyncio.to_thread(software_store.save_inventory, target.device_id, result.get("data") or {})
+    elif ok and tool_id == "uninstall_software":
+        await asyncio.to_thread(software_store.mark_uninstalled, target.device_id, args["id"])
+    elif ok and tool_id == "update_software":
+        await asyncio.to_thread(software_store.mark_updated, target.device_id, args["package_id"])
+    if changes_device:
+        await asyncio.to_thread(session_store.add_audit, None, target.device_id, tool_id, {**args, "name": job["name"]}, "operator (Software tab)", ok, summary)
+        await asyncio.to_thread(decision_log.record, "software_action", target.device_id, {
+            "device": target.label, "device_id": target.device_id, "action": f"{job['action']} {job['name']}", "tool_id": tool_id,
+            "args": args, "approved_by": "operator", "state": "finished", "job_id": job["job_id"], "ok": ok, "result": summary})
+    data = result.get("data") if tool_id in JOB_DATA_TOOLS else None
+    job.update(state="done" if ok else "failed", summary=summary, data=data, finished_at=datetime.now(timezone.utc).isoformat())
+
+
+@app.get("/api/agents/{device_id}/software")
+def device_software(device_id: str):
+    target = _software_target(device_id)
+    running = [job for job in list(software_jobs.values()) if job["device_id"] == target.device_id and job["state"] == "running"]
+    return {"device_id": target.device_id, "device": target.label, "os_type": target.os_type, "inventory": software_store.get_inventory(target.device_id), "jobs": running}
+
+
+@app.post("/api/agents/{device_id}/software/scan")
+async def scan_device_software(device_id: str):
+    target = _software_target(device_id)
+    running = next((job for job in list(software_jobs.values()) if job["device_id"] == target.device_id and job["action"] == "scan" and job["state"] == "running"), None)
+    return running or _start_software_job(target, "scan", "Software inventory", "installed_software", {"check_updates": True}, "read")
+
+
+@app.post("/api/agents/{device_id}/software/uninstall")
+async def uninstall_device_software(device_id: str, payload: dict):
+    target = _software_target(device_id, manage=True)
+    entry_id = str(payload.get("id") or "").strip()
+    if not entry_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    return _start_software_job(target, "uninstall", str(payload.get("name") or entry_id)[:200], "uninstall_software", {"id": entry_id}, "high")
+
+
+@app.post("/api/agents/{device_id}/software/update")
+async def update_device_software(device_id: str, payload: dict):
+    target = _software_target(device_id, manage=True)
+    package_id = str(payload.get("package_id") or "").strip()
+    if not package_id:
+        raise HTTPException(status_code=400, detail="package_id is required")
+    return _start_software_job(target, "update", str(payload.get("name") or package_id)[:200], "update_software", {"package_id": package_id}, "medium")
+
+
+@app.post("/api/agents/{device_id}/software/leftovers")
+async def find_device_leftovers(device_id: str, payload: dict):
+    """Preview what an uninstalled program left behind (read-only scan on the device)."""
+    target = _software_target(device_id, manage=True)
+    entry_id = str(payload.get("id") or "").strip()
+    if not entry_id or len(entry_id) > 600:
+        raise HTTPException(status_code=400, detail="id is required")
+    return _start_software_job(target, "leftovers", str(payload.get("name") or entry_id)[:200], "find_leftovers", {"id": entry_id}, "read")
+
+
+@app.post("/api/agents/{device_id}/software/quarantine")
+async def quarantine_device_leftovers(device_id: str, payload: dict):
+    """Move the leftovers a person ticked to the device's quarantine (restorable for 7 days)."""
+    target = _software_target(device_id, manage=True)
+    scan_id = str(payload.get("scan_id") or "")
+    ids = payload.get("candidate_ids") or []
+    if not SCAN_ID_PATTERN.fullmatch(scan_id) or not isinstance(ids, list) or not ids or len(ids) > 60 or not all(isinstance(item, str) and CANDIDATE_ID_PATTERN.fullmatch(item) for item in ids):
+        raise HTTPException(status_code=400, detail="scan_id and a list of candidate ids are required")
+    return _start_software_job(target, "quarantine", str(payload.get("name") or "leftovers")[:200], "quarantine_leftovers",
+                               {"scan_id": scan_id, "candidate_ids": ",".join(ids)}, "high")
+
+
+@app.post("/api/agents/{device_id}/software/restore")
+async def restore_device_quarantine(device_id: str, payload: dict):
+    target = _software_target(device_id, manage=True)
+    batch_id = str(payload.get("batch_id") or "")
+    if not BATCH_ID_PATTERN.fullmatch(batch_id):
+        raise HTTPException(status_code=400, detail="batch_id is required")
+    return _start_software_job(target, "restore", str(payload.get("name") or batch_id)[:200], "restore_quarantine", {"batch_id": batch_id}, "medium")
+
+
+@app.post("/api/agents/{device_id}/software/quarantine-list")
+async def list_device_quarantine(device_id: str):
+    target = _software_target(device_id, manage=True)
+    return _start_software_job(target, "quarantine-list", "Quarantine", "list_quarantine", {}, "read")
+
+
+@app.post("/api/agents/{device_id}/software/leftovers/review")
+def review_device_leftovers(device_id: str, payload: dict):
+    """AI advice on a finished leftover scan (which items look shared or risky). Advice only: nothing moves."""
+    job = software_jobs.get(str(payload.get("job_id") or ""))
+    if not job or job["device_id"] != device_id or job["action"] != "leftovers" or not (job.get("data") or {}).get("candidates"):
+        raise HTTPException(status_code=404, detail="Run a leftover scan first")
+    if not is_ai_available():
+        raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
+    think = bool(payload.get("think"))
+    try:
+        result = review_leftovers(job["data"].get("program"), job["data"]["candidates"], think=think)
+    except (AIModelUnavailableError, AIUnavailableError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    _record_ai("leftover_review", device_id, think, {"summary": result.get("summary"), "program": job["data"].get("program"), "advice": result.get("items")})
+    return result
+
+
+@app.get("/api/software/jobs/{job_id}")
+def software_job(job_id: str):
+    job = software_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found (the server may have restarted)")
+    return job
+
+
+@app.post("/api/agents/{device_id}/os-updates/install")
+async def install_device_os_updates(device_id: str, payload: dict):
+    """Install the OS updates a person ticked (ids from the device's own os_updates search). Never restarts."""
+    target = _software_target(device_id, manage=True)
+    ids = payload.get("update_ids") or []
+    if not isinstance(ids, list) or not ids or len(ids) > MAX_OS_UPDATE_IDS or not all(isinstance(item, str) and OS_UPDATE_ID_PATTERN.fullmatch(item) for item in ids):
+        raise HTTPException(status_code=400, detail="update_ids must list the updates to install (ids from the update search)")
+    name = f"{len(ids)} OS update{'s' if len(ids) != 1 else ''}"
+    return _start_software_job(target, "os-update", name, "install_os_updates", {"update_ids": ",".join(ids)}, "high")
+
+
+# ---------------------------------------------------------------------------
+# Performance tab: one full test per device, shown section by section as each check finishes
+# ---------------------------------------------------------------------------
+
+performance_jobs = {}
+PERFORMANCE_JOBS_KEPT = 50
+MAX_OS_UPDATE_IDS = 50
+OS_UPDATE_ID_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9][A-Za-z0-9.+_:~-]{0,199})$")
+# Phases run one after another and the checks inside a phase run side by side. Live CPU and memory readings
+# come first and the benchmark runs alone, so the other checks' PowerShell work skews neither.
+PERFORMANCE_PHASES = (
+    (("system", "system_overview", {}), ("processes", "top_processes", {"sort_by": "cpu"}), ("memory", "top_processes", {"sort_by": "memory"})),
+    (("benchmark", "performance_benchmark", {}),),
+    (("os_updates", "os_updates", {}), ("apps", "installed_software", {"check_updates": True}), ("boot", "boot_performance", {}),
+     ("hardware", "hardware_health", {}), ("disks", "disk_health", {}), ("battery", "battery_health", {}), ("input", "input_devices", {})),
+)
+# Keyboard and mouse status is shown, but it has nothing to do with speed, so the AI analysis leaves it out.
+ANALYSIS_SKIPPED_SECTIONS = {"input"}
+NEW_AGENT_MESSAGE = "This check needs the newer agent: re-run the install command from Add Agent on the device."
+
+
+IMAGE_MANAGED_NOTE = "The server container's packages come from its Docker image: rebuild the image to update them."
+
+
+def _image_managed(target):
+    return target.is_local and bool(os.getenv("SENTINEL_IN_DOCKER"))
+
+
+def _app_updates(inventory, can_update=True):
+    """The Performance tab only needs the programs with an update (the full list is in the Software tab)."""
+    software = (inventory or {}).get("software") or []
+    updates = [{key: item.get(key) for key in ("id", "name", "version", "available_version", "update_id", "update_source")} for item in software if item.get("update_available") and item.get("update_id")]
+    note = (inventory or {}).get("updates_note") if can_update else IMAGE_MANAGED_NOTE
+    return {"count": len(software), "updates_available": len(updates), "updates": updates[:100], "updates_note": note, "can_update": can_update}
+
+
+async def _run_performance_check(job, target, section, tool_id, args):
+    entry = job["sections"][section]
+    tool = get_tool(tool_id)
+    if tool is None or target.os_type not in tool.os:
+        entry.update(state="skipped", ok=False, summary=f"Not available on {target.os_type}")
+        return
+    entry["state"] = "running"
+    try:
+        result = await execute(target, tool_id, args, "read")
+    except Exception as error:  # one broken check must not stop the others
+        logger.exception("Performance check %s failed", tool_id)
+        result = {"ok": False, "summary": f"{tool_id} failed: {error}"}
+    ok, summary, data = bool(result.get("ok")), result.get("summary") or "", result.get("data")
+    if not ok and "Unknown or disallowed tool" in summary:
+        summary = NEW_AGENT_MESSAGE
+    if ok and tool_id == "installed_software":
+        await asyncio.to_thread(software_store.save_inventory, target.device_id, data or {})
+        data = _app_updates(data, can_update=not _image_managed(target))
+    elif ok and tool_id == "os_updates" and isinstance(data, dict) and _image_managed(target):
+        data = {**data, "can_install": False, "install_note": IMAGE_MANAGED_NOTE}
+    entry.update(state="done" if ok else "failed", ok=ok, summary=summary, data=data, duration_ms=result.get("duration_ms"))
+    # Instant rule findings (milliseconds) so each card can show what is wrong while the rest still runs.
+    evidence = [(item["tool_id"], item["args"], {"ok": item["ok"], "summary": item["summary"], "data": item["data"]}) for item in list(job["sections"].values()) if item["state"] == "done"]
+    job["findings"] = [{key: item[key] for key in ("key", "severity", "title", "detail", "source")} for item in rule_findings.analyze(evidence, target.os_type)]
+
+
+async def _run_performance_job(job, target):
+    try:
+        for phase in PERFORMANCE_PHASES:
+            await asyncio.gather(*(_run_performance_check(job, target, section, tool_id, args) for section, tool_id, args in phase))
+    except Exception:
+        logger.exception("Performance test %s failed", job["job_id"])
+    finally:
+        job.update(state="done", finished_at=datetime.now(timezone.utc).isoformat())
+
+
+def _performance_target(device_id):
+    target = resolve_target(device_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return target
+
+
+@app.post("/api/agents/{device_id}/performance/test")
+async def start_performance_test(device_id: str):
+    """Run every read-only performance, hardware and update check on the device. Nothing is changed."""
+    target = _performance_target(device_id)
+    running = next((job for job in list(performance_jobs.values()) if job["device_id"] == target.device_id and job["state"] == "running"), None)
+    if running:
+        return running
+    if not target.is_local and target.status != "online":
+        # Its checks would only time out one by one (minutes) while nobody picks them up.
+        raise HTTPException(status_code=409, detail=f"{target.label} is offline: start the device (its agent connects by itself), then run the test")
+    finished = [job_id for job_id, job in list(performance_jobs.items()) if job["state"] != "running"]
+    for job_id in finished[: max(0, len(performance_jobs) - PERFORMANCE_JOBS_KEPT + 1)]:
+        performance_jobs.pop(job_id, None)
+    sections = {section: {"tool_id": tool_id, "args": args, "state": "queued", "ok": None, "summary": None, "data": None} for phase in PERFORMANCE_PHASES for section, tool_id, args in phase}
+    job = {"job_id": secrets.token_hex(8), "device_id": target.device_id, "device": target.label, "os_type": target.os_type, "state": "running",
+           "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None, "sections": sections, "findings": [], "analysis_session_id": None}
+    performance_jobs[job["job_id"]] = job
+    _spawn(_run_performance_job(job, target))
+    return job
+
+
+@app.get("/api/performance/jobs/{job_id}")
+def performance_job(job_id: str):
+    job = performance_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Test not found (the server may have restarted). Run it again.")
+    return job
+
+
+@app.get("/api/agents/{device_id}/performance/latest")
+def latest_performance_test(device_id: str):
+    target = _performance_target(device_id)
+    jobs = [job for job in list(performance_jobs.values()) if job["device_id"] == target.device_id]
+    if not jobs:
+        return Response(status_code=204)  # no test since the server started (not an error)
+    return max(jobs, key=lambda job: job["started_at"])
+
+
+@app.post("/api/agents/{device_id}/performance/analyse")
+async def analyse_performance_test(device_id: str, payload: dict):
+    """Deep AI analysis of a finished full test: a diagnosis session (3-4 ranked solutions, suggest-only)
+    that starts from the test's results instead of running the checks again."""
+    target = _performance_target(device_id)
+    job = performance_jobs.get(str(payload.get("job_id") or ""))
+    if not job or job["device_id"] != target.device_id:
+        raise HTTPException(status_code=404, detail="Run the full test first")
+    if job["state"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for the full test to finish")
+    previous = session_store.get_session(job["analysis_session_id"], include_steps=False) if job.get("analysis_session_id") else None
+    if previous and previous["status"] in ("queued", "running"):
+        return {"session_id": previous["session_id"], "status": previous["status"], "device": target.label, "mode": None}
+    evidence = [(entry["tool_id"], entry["args"], {"ok": entry["ok"], "summary": entry["summary"], "data": entry["data"]})
+                for section, entry in job["sections"].items() if section not in ANALYSIS_SKIPPED_SECTIONS and entry["state"] in ("done", "failed")]
+    if not any(result["ok"] for _tool_id, _args, result in evidence):
+        raise HTTPException(status_code=400, detail="The test returned no results to analyse")
+    mode = "deep" if payload.get("think") else "fast"
+    playbook = get_playbook("performance")
+    session_id = session_store.create_session(target.device_id, target.label, target.os_type, playbook["issue"], playbook["id"])
+    job["analysis_session_id"] = session_id
+    _spawn(run_diagnosis(session_id, mode, preset_evidence=evidence))
+    return {"session_id": session_id, "status": "queued", "device": target.label, "mode": mode}
 
 
 @app.get("/api/agents")
@@ -412,6 +867,22 @@ def agent_logs(device_id: str):
     return _device_diagnostics_field(device_id, "event_logs", "This device has not reported event log data yet")
 
 
+@app.post("/api/agents/{device_id}/logs/diagnose")
+def diagnose_device_event_logs(device_id: str, think: bool = False):
+    latest = get_latest_report(device_id)
+    if not latest:
+        raise HTTPException(status_code=404, detail="This device has not reported event log data yet")
+    event_logs = latest["diagnostics"].get("event_logs") or {}
+    if event_logs.get("available") and event_logs.get("events") and not is_ai_available():
+        raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
+    try:
+        result = diagnose_logs(event_logs, think=think)
+    except (AIModelUnavailableError, AIUnavailableError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    _record_ai("log_analysis", device_id, think, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")}, used_ai=result.get("source") != "rules")
+    return result
+
+
 @app.get("/api/agents/{device_id}/alerts")
 def agent_alerts(device_id: str, limit: int = 100):
     return {"alerts": get_alerts(max(1, min(limit, 500)), device_id)}
@@ -425,17 +896,31 @@ def revoke_agent(device_id: str, request: Request):
     return {"deleted": True, "device_id": device_id}
 
 
+@app.get("/api/agents/{device_id}/health-report")
+def device_health_report(device_id: str):
+    """Instant rule-based report: score, every detected issue and the full system details."""
+    latest = get_latest_report(device_id)
+    if not latest:
+        raise HTTPException(status_code=404, detail="No diagnostics found for device")
+    return health_report.build(latest["diagnostics"], latest.get("timestamp"))
+
+
 @app.post("/api/agents/{device_id}/agent-diagnose")
-def diagnose_device(device_id: str):
+def diagnose_device(device_id: str, think: bool = False):
     if not is_ai_available():
         raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
     latest = get_latest_report(device_id)
     if not latest:
         raise HTTPException(status_code=404, detail="No diagnostics found for device")
     try:
-        return diagnose(latest["diagnostics"], get_alerts(20, device_id))
+        report = latest["diagnostics"]
+        issues = health_report.detect_issues(report)
+        result = diagnose(report, get_alerts(20, device_id), issues, think=think)
     except (AIModelUnavailableError, AIUnavailableError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    _record_ai("health_analysis", device_id, think, {"summary": result.get("summary"), "root_cause": result.get("root_cause"),
+               "issues": [item["title"] for item in issues], "explanations": result.get("issues"), "steps": result.get("steps")})
+    return result
 
 
 @app.get("/api/agents/download/{platform}")
@@ -481,11 +966,13 @@ def agent_diagnose(payload: dict):
     if not is_ai_available():
         raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
     try:
-        return diagnose(payload.get("diagnostics") or payload.get("report") or collect_report(), payload.get("alert_history") or get_alerts(20))
+        result = diagnose(payload.get("diagnostics") or payload.get("report") or collect_report(), payload.get("alert_history") or get_alerts(20))
     except AIModelUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AIUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    _record_ai("health_analysis", LOCAL_DEVICE_ID, False, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")})
+    return result
 
 
 @app.post("/api/agent/action")
@@ -509,12 +996,23 @@ def agent_chat(payload: dict):
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
 
-    session_id = str(payload.get("session_id", "default"))
+    # Chat about a chosen device; in Docker "this server" is only the container.
+    device_id = str(payload.get("device_id") or "").strip()
+    report = None
+    if device_id and device_id not in (LOCAL_DEVICE_ID, "local-server"):
+        latest = get_latest_report(device_id)
+        if not latest:
+            raise HTTPException(status_code=404, detail="This device has not reported any data yet")
+        report = latest["diagnostics"]
+    session_id = f"{payload.get('session_id', 'default')}:{device_id or LOCAL_DEVICE_ID}"
     history = chat_sessions.setdefault(session_id, [])
     try:
-        reply = chat(message, payload.get("diagnostics") or collect_report(), history)
+        think = bool(payload.get("think"))
+        reply = chat(message, report or payload.get("diagnostics") or collect_report(), history, think=think)
         history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply.get("plain_explanation", "")}])
         chat_sessions[session_id] = history[-6:]
+        _record_ai("chat_answer", device_id or LOCAL_DEVICE_ID, think, {"question": message[:500], "summary": reply.get("plain_explanation"),
+                   "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations")})
         return {"reply": reply, "session_id": session_id}
     except AIModelUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
@@ -524,7 +1022,66 @@ def agent_chat(payload: dict):
 
 @app.get("/api/ai/status")
 def ai_status_endpoint():
-    return {**ai_status(), "auto_fix_max_risk": auto_fix_max_risk() or "none", "diagnosis_mode": default_mode(), "learned_model": model_builder.version_info()}
+    return {**ai_status(), "load_error": getattr(get_llm_provider(), "last_load_error", None), "suggest_only": True, "diagnosis_thinking": diagnosis_thinking(),
+            "diagnosis_mode": default_mode(), "learned_model": model_builder.version_info()}
+
+
+def _ollama_provider():
+    provider = get_llm_provider()
+    if provider.name != "ollama":
+        raise HTTPException(status_code=400, detail="Model switching needs LLM_PROVIDER=ollama")
+    return provider
+
+
+def _catalog_model(payload):
+    name = str(payload.get("model", "")).strip()
+    if name not in llm_catalog.CATALOG_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unknown model '{name}'. Choose one of: {', '.join(sorted(llm_catalog.CATALOG_NAMES))}")
+    return name
+
+
+@app.get("/api/ai/models")
+def ai_models():
+    provider = get_llm_provider()
+    if provider.name != "ollama":
+        return {"provider": provider.name, "switchable": False, "current": getattr(provider, "model", None), "models": []}
+    status = provider.status()
+    installed = set(status.get("installed_models") or [])
+    pulls = llm_catalog.pull_progress()
+    models = [
+        {
+            **item,
+            # A finished download counts at once; Ollama's model list is cached for a few seconds.
+            "installed": item["name"] in installed or f"{item['name']}:latest" in installed or (pulls.get(item["name"]) or {}).get("state") == "done",
+            "active": item["name"] == provider.base_model,
+            "pull": pulls.get(item["name"]),
+        }
+        for item in llm_catalog.CATALOG
+    ]
+    return {"provider": "ollama", "switchable": True, "current": provider.base_model, "running_model": status.get("model"), "available": status.get("available"), "load_error": provider.last_load_error, "models": models}
+
+
+@app.post("/api/ai/models/select")
+async def ai_select_model(payload: dict):
+    provider = _ollama_provider()
+    name = _catalog_model(payload)
+    catalog = await asyncio.to_thread(ai_models)
+    if not next(model for model in catalog["models"] if model["name"] == name)["installed"]:
+        raise HTTPException(status_code=409, detail=f"{name} is not downloaded yet")
+    previous = provider.base_model
+    llm_catalog.save_selected_model(name)
+    await asyncio.to_thread(provider.use_model, name)
+    logger.info("AI model switched to %s", name)
+    await asyncio.to_thread(decision_log.record, "model_switch", name, {"action": f"Switched the AI base model from {previous} to {name}", "previous": previous, "model": name, "approved_by": "operator"})
+    _spawn(asyncio.to_thread(prepare_ai, "model switch"))
+    return await asyncio.to_thread(ai_models)
+
+
+@app.post("/api/ai/models/pull")
+def ai_pull_model(payload: dict):
+    provider = _ollama_provider()
+    name = _catalog_model(payload)
+    return {"model": name, "started": llm_catalog.start_pull(provider.host, name)}
 
 
 # ============================================================================
@@ -603,10 +1160,32 @@ async def troubleshoot_apply_fix(session_id: str, index: int):
         raise HTTPException(status_code=404, detail="Fix not found")
     if session["status"] in ("queued", "running", "fixing", "verifying"):
         raise HTTPException(status_code=409, detail="The agent is busy with this session; wait for it to finish")
+    _refuse_if_changing(session["device_id"])
     if fixes[index]["status"] in ("running", "applied"):
         raise HTTPException(status_code=409, detail="This fix was already applied")
+    solutions = (session.get("report") or {}).get("solutions") or []
+    if any(item.get("fix_index") == index and item.get("status") in ("rejected", "done") for item in solutions):
+        raise HTTPException(status_code=409, detail="This solution was rejected or done by hand; it will not be run")
     _spawn(apply_fix(session_id, index, approved_by="operator"))
     return {"accepted": True, "session_id": session_id, "index": index}
+
+
+@app.post("/api/troubleshoot/{session_id}/solutions/{index}/decision")
+async def troubleshoot_solution_decision(session_id: str, index: int, payload: dict):
+    """A person marks a suggested solution as done by hand, or rejects it (recorded, never executed)."""
+    try:
+        solution = await decide_solution(session_id, index, str(payload.get("decision") or ""), decided_by="operator")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"session_id": session_id, "index": index, "solution": solution}
+
+
+@app.get("/api/decisions")
+def decisions_feed(limit: int = 50):
+    """Newest AI decisions and human approvals from the decisions folder."""
+    # In Docker the folder is the project's ./decisions, mounted into the container.
+    folder = "decisions/ in the AIops project folder" if os.getenv("SENTINEL_IN_DOCKER") else str(decision_log.decisions_dir())
+    return {"folder": folder, "decisions": decision_log.recent(max(1, min(limit, 500)))}
 
 
 @app.websocket("/ws/troubleshoot/{session_id}")
@@ -687,10 +1266,13 @@ BINARY_BUILDS = {"windows": ("windows", "DeviceHealthAgent.exe"), "linux": ("lin
 
 
 def _server_url(request, override=None):
-    for candidate in (override, os.getenv("SENTINEL_PUBLIC_URL", "")):
+    """Address agents should use: an explicit override, then the configured SENTINEL_PUBLIC_URL (stable),
+    then the live ngrok URL (free URLs change when ngrok restarts, which strands installed agents), then
+    the address the browser used."""
+    for candidate in (override, os.getenv("SENTINEL_PUBLIC_URL", ""), public_url.ngrok_url()):
         candidate = (candidate or "").strip().rstrip("/")
         if candidate:
-            if not SERVER_URL_PATTERN.match(candidate):
+            if not SERVER_URL_PATTERN.fullmatch(candidate):
                 raise HTTPException(status_code=400, detail="Invalid server URL")
             return candidate
     return str(request.base_url).rstrip("/")
@@ -703,13 +1285,15 @@ def open_enrollment():
 
 @app.get("/api/agents/enrollment")
 def enrollment_info(request: Request):
-    return {"open": open_enrollment(), "server_url": _server_url(request)}
+    ngrok = public_url.ngrok_url()
+    return {"open": open_enrollment(), "server_url": _server_url(request), "ngrok_url": ngrok,
+            "ngrok_note": "Use it for devices outside this network. Free ngrok URLs change when ngrok restarts, so devices installed with it must re-run the install command after a change." if ngrok else None}
 
 
 def _require_install_token(token):
     if open_enrollment() and not token:
         return
-    if not TOKEN_PATTERN.match(token or "") or not is_valid_install_token(token):
+    if not TOKEN_PATTERN.fullmatch(token or "") or not is_valid_install_token(token):
         raise HTTPException(status_code=401, detail="Invalid or expired enrollment token. Generate a new one in the dashboard.")
 
 
@@ -754,7 +1338,7 @@ def agent_binary(platform: str, token: str = ""):
 
 
 # ============================================================================
-# Self-improvement (learned cases and the sentinel-tech model)
+# Self-improvement (learned cases and the aiops-brain model)
 # ============================================================================
 
 @app.post("/api/troubleshoot/{session_id}/feedback")

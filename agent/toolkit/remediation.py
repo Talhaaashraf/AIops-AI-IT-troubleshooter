@@ -1,7 +1,7 @@
 """Fix actions ("remediation") the AI may *propose* but never run on its own.
 
-These only execute after an operator clicks Apply in the dashboard (or when
-AUTO_FIX_MAX_RISK allows it), and the device agent can refuse them with
+These only execute after a person approves them in the dashboard (there is no
+automatic path), and the device agent can refuse them with
 allow_remediation/max_risk in agent_config.json. Every action is a fixed,
 allow-listed operation; arguments are validated and never reach a shell.
 """

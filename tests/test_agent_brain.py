@@ -36,7 +36,7 @@ class FakeProvider:
     def is_available(self):
         return True
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None):
+    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):
         self.calls.append({"tools": [tool["function"]["name"] for tool in tools or []], "json_mode": json_mode})
         return self.replies.pop(0)
 
@@ -165,7 +165,7 @@ def test_model_builder_writes_modelfile_and_dataset(monkeypatch):
     modelfile = (model_builder.LEARNED_DIR / "Modelfile").read_text(encoding="utf-8")
     assert "FROM " in modelfile and "Stale DNS cache" in modelfile and "MESSAGE assistant" in modelfile
     assert len((model_builder.LEARNED_DIR / "training_data.jsonl").read_text(encoding="utf-8").splitlines()) == 3
-    assert calls[0]["model"] == "sentinel-tech" and calls[0]["messages"]
+    assert calls[0]["model"] == model_builder.learned_model_name() and calls[0]["messages"]
     assert model_builder.maybe_rebuild() is None
 
 

@@ -229,6 +229,107 @@ def startup_programs():
     return {"ok": True, "summary": f"{len(items)} startup item(s)", "data": items[:60]}
 
 
+# Boot timing comes from the Diagnostics-Performance log, which only administrators (the agent's SYSTEM
+# task) can read. Event 100 is one boot; 101-110 name the apps, drivers and services that slowed one down.
+BOOT_SCRIPT = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$out = [ordered]@{}
+$out.fast_startup = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction SilentlyContinue).HiberbootEnabled
+$kernel = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Boot'; Id = 27 } -MaxEvents 1 -ErrorAction SilentlyContinue
+if ($kernel) { $out.boot_type = [int]$kernel.Properties[0].Value }
+function Fields($event) { $d = @{}; ([xml]$event.ToXml()).Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' }; $d }
+try {
+  $log = 'Microsoft-Windows-Diagnostics-Performance/Operational'
+  $out.boots = @(Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 100 } -MaxEvents 5 -ErrorAction Stop | ForEach-Object {
+    $d = Fields $_; [pscustomobject]@{ at = $_.TimeCreated.ToString('o'); total_ms = [int]$d.BootTime; main_ms = [int]$d.MainPathBootTime; post_ms = [int]$d.BootPostBootTime } })
+  $out.slowdowns = @(Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 101, 102, 103, 106, 109; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 80 -ErrorAction SilentlyContinue | ForEach-Object {
+    $d = Fields $_; $name = @($d.FriendlyName, $d.Name) | Where-Object { $_ } | Select-Object -First 1
+    [pscustomobject]@{ kind = $_.Id; name = [string]$name; total_ms = [int]$d.TotalTime; slower_by_ms = [int]$d.DegradationTime } })
+} catch { $out.boot_log_error = $_.Exception.Message }
+[pscustomobject]$out | ConvertTo-Json -Compress -Depth 4
+"""
+BOOT_SLOWDOWN_KINDS = {101: "app", 102: "driver", 103: "service", 106: "background task", 109: "device"}
+WINDOWS_BOOT_TYPES = {0: "full boot", 1: "fast startup (hybrid boot)", 2: "resumed from hibernation"}
+SYSTEMD_TIME = re.compile(r"(?:(\d+)min\s*)?([\d.]+)(ms|s)\b")
+
+
+def parse_systemd_seconds(text):
+    """'1min 2.345s' -> 62.3, '850ms' -> 0.85 (systemd-analyze time format)."""
+    match = SYSTEMD_TIME.search(text or "")
+    if not match:
+        return None
+    value = float(match.group(2)) / (1000 if match.group(3) == "ms" else 1)
+    return round(value + int(match.group(1) or 0) * 60, 1)
+
+
+def _windows_boot():
+    output = powershell(BOOT_SCRIPT, timeout=50)["stdout"]
+    try:
+        raw = json.loads(output) if output else {}
+    except json.JSONDecodeError:
+        raw = {}
+    boots = [item for item in (raw.get("boots") or []) if isinstance(item, dict) and item.get("total_ms")]
+    if isinstance(raw.get("boots"), dict):
+        boots = [raw["boots"]]
+    data = {"fast_startup": bool(raw.get("fast_startup")), "last_boot_type": WINDOWS_BOOT_TYPES.get(raw.get("boot_type"))}
+    if boots:
+        last = boots[0]
+        data.update(last_boot_seconds=round(last["total_ms"] / 1000, 1), desktop_ready_seconds=round(last["main_ms"] / 1000, 1),
+                    after_sign_in_seconds=round(last["post_ms"] / 1000, 1),
+                    average_boot_seconds=round(sum(item["total_ms"] for item in boots) / len(boots) / 1000, 1), boots_measured=len(boots))
+    elif raw.get("boot_log_error") or not output:
+        data["note"] = "Boot timing needs administrator rights (the agent's SYSTEM task has them)" if not is_admin() else "No boot timing recorded yet"
+    slowest = {}
+    rows = raw.get("slowdowns") or []
+    for item in rows if isinstance(rows, list) else [rows]:
+        if isinstance(item, dict) and item.get("name"):
+            key = (item.get("kind"), item["name"])
+            if key not in slowest or item.get("slower_by_ms", 0) > slowest[key]["slower_by_ms"]:
+                slowest[key] = {"name": item["name"][:120], "kind": BOOT_SLOWDOWN_KINDS.get(item.get("kind"), "item"),
+                                "slower_by_ms": int(item.get("slower_by_ms") or 0), "total_ms": int(item.get("total_ms") or 0)}
+    data["slowed_by"] = sorted(slowest.values(), key=lambda item: -item["slower_by_ms"])[:6]
+    return data
+
+
+def _linux_boot():
+    result = run_command(["systemd-analyze", "time"], timeout=20)
+    data = {}
+    total = re.search(r"=\s*(.+)$", result["stdout"].splitlines()[0] if result["stdout"] else "")
+    if total:
+        data["last_boot_seconds"] = parse_systemd_seconds(total.group(1))
+        userspace = re.search(r"\+\s*([^+=]+?)\s*\(userspace\)", result["stdout"])
+        if userspace:
+            data["after_sign_in_seconds"] = parse_systemd_seconds(userspace.group(1))
+        blame = run_command(["systemd-analyze", "blame", "--no-pager"], timeout=20)["stdout"].splitlines()
+        data["slowed_by"] = [{"name": parts[-1][:120], "kind": "service", "total_ms": int((parse_systemd_seconds(" ".join(parts[:-1])) or 0) * 1000)}
+                             for parts in (line.split() for line in blame[:6]) if len(parts) >= 2]
+    else:
+        data["note"] = (result["stderr"] or "systemd-analyze is not available")[:160]
+    return data
+
+
+@tool("boot_performance", "How long the computer takes to start and what slows the start-up down (Windows boot diagnostics or systemd-analyze), plus uptime, fast startup and how many programs start at sign-in.", timeout=90)
+def boot_performance():
+    system = os_name()
+    data = _windows_boot() if system == "Windows" else _linux_boot() if system == "Linux" else {}
+    uptime_seconds = max(0, time.time() - psutil.boot_time())
+    data["uptime_days"] = round(uptime_seconds / 86400, 1)
+    data["last_started"] = datetime.datetime.fromtimestamp(psutil.boot_time()).isoformat(timespec="minutes")
+    data["startup_programs"] = len(startup_programs()["data"])
+    parts = []
+    if data.get("last_boot_seconds"):
+        parts.append(f"Last start-up took {data['last_boot_seconds']} s" + (f" (average {data['average_boot_seconds']} s over {data['boots_measured']} boots)" if data.get("boots_measured", 0) > 1 else ""))
+    else:
+        parts.append(data.get("note") or "Start-up time unknown")
+    if data.get("slowed_by"):
+        parts.append(("slowed in the last 30 days by " if system == "Windows" else "slowest: ") + ", ".join(item["name"] for item in data["slowed_by"][:3]))
+    parts.append(f"running for {data['uptime_days']} days")
+    parts.append(f"{data['startup_programs']} startup programs")
+    if data.get("fast_startup"):
+        parts.append("fast startup on (Shut down does not fully restart Windows)")
+    return {"ok": True, "summary": "; ".join(parts), "data": data}
+
+
 # ---------------------------------------------------------------------------
 # Network
 # ---------------------------------------------------------------------------
@@ -283,7 +384,9 @@ def check_internet():
         if ipv4:
             adapters.append({"name": name, "up": bool(stats.get(name) and stats[name].isup), "ipv4": ipv4, "speed_mbps": stats[name].speed if stats.get(name) else None})
     stages = {"adapters_with_ip": [item for item in adapters if item["up"]]}
-    stages["self_assigned_ip"] = any(ip.startswith("169.254.") for item in adapters for ip in item["ipv4"])
+    # Only an active adapter with nothing but a 169.254.x.x address means DHCP failed; virtual
+    # Wi-Fi Direct adapters often carry one and are harmless.
+    stages["self_assigned_ip"] = any(item["up"] and all(ip.startswith("169.254.") for ip in item["ipv4"]) for item in adapters)
     gateway = _default_gateway()
     stages["default_gateway"] = gateway
     stages["gateway_ping"] = _ping(gateway, 3) if gateway and valid_host(gateway) else None
@@ -308,7 +411,13 @@ def check_internet():
     except Exception as error:
         stages["http"] = {"ok": False, "error": str(error)[:200]}
 
-    if not stages["adapters_with_ip"]:
+    # Real traffic is the ground truth: when DNS, TCP and HTTP all work, a missing gateway
+    # (the lookup can time out on a busy machine) or an odd adapter is not an outage.
+    online = stages["dns_resolution"]["ok"] and stages["tcp_to_internet"]["ok"] and stages["http"]["ok"]
+    if online:
+        slow = (stages["dns_resolution"].get("ms") or 0) > 300 or (stages["tcp_to_internet"].get("ms") or 0) > 300
+        verdict = "Internet connectivity works" + (" but latency is high" if slow else " normally")
+    elif not stages["adapters_with_ip"]:
         verdict = "No active network adapter has an IP address (cable/Wi-Fi disconnected or adapter disabled)"
     elif stages["self_assigned_ip"] and not gateway:
         verdict = "Adapter has a self-assigned 169.254.x.x address: DHCP failed, IP renewal is likely needed"

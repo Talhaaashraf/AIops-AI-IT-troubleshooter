@@ -12,5 +12,12 @@ build/
 
 # Large model weights live in models/<name>/ but are not committed
 models/**/*.gguf
-models/sentinel-tech/training_data.jsonl
+# learned device cases, exported for fine-tuning
+models/*/training_data.jsonl
 .pytest_cache/
+
+# AI decisions and approvals contain device data (see backend/decision_log.py)
+decisions/
+
+# Written by the agent (and by tests that import it)
+agent/agent_log.txt

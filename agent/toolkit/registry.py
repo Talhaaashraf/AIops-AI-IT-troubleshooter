@@ -27,14 +27,16 @@ class Tool:
     required: tuple = ()
     os: frozenset = ALL_OS
     timeout: int = 90
+    # False keeps a tool out of the AI's function list (huge outputs, or actions only a person should start).
+    ai_visible: bool = True
 
 
-def tool(tool_id, description, risk="read", params=None, required=(), os=ALL_OS, timeout=90):
+def tool(tool_id, description, risk="read", params=None, required=(), os=ALL_OS, timeout=90, ai_visible=True):
     if risk not in RISK_LEVELS:
         raise ValueError(f"Unknown risk level {risk}")
 
     def decorator(fn):
-        _TOOLS[tool_id] = Tool(tool_id, description, risk, fn, params or {}, tuple(required), frozenset(os), timeout)
+        _TOOLS[tool_id] = Tool(tool_id, description, risk, fn, params or {}, tuple(required), frozenset(os), timeout, ai_visible)
         return fn
 
     return decorator
@@ -75,6 +77,7 @@ def tool_schemas(target_os=None, max_risk="read", min_risk="read"):
             },
         }
         for item in list_tools(target_os, max_risk, min_risk)
+        if item.ai_visible
     ]
 
 
