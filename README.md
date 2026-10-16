@@ -56,7 +56,7 @@ python models/migrate_model.py qwen3:8b     # optional: copies the model into mo
 docker compose up -d --build                # ollama + model-init + sentinel
 ```
 
-Open `http://localhost:8000`, or your LAN IP when `SENTINEL_PUBLIC_URL` is set. With `OPEN_ENROLLMENT=true`, agents attach with just the install script and no token. Details: [docs/04-docker.md](docs/04-docker.md). The design notes and decisions for the whole project are in [docs/](docs/README.md), including the self-improving `sentinel-tech` model ([docs/05-self-improving-model.md](docs/05-self-improving-model.md)) and model licensing ([docs/06-models-and-licensing.md](docs/06-models-and-licensing.md)).
+Open `http://localhost:8000`, or your LAN IP when `SENTINEL_PUBLIC_URL` is set. With `OPEN_ENROLLMENT=true`, agents attach with just the install script and no token. Details: [docs/04-docker.md](docs/04-docker.md). The design notes and decisions for the whole project are in [docs/](docs/README.md), including the self-improving `sentinel-tech` model ([docs/05-self-improving-model.md](docs/05-self-improving-model.md)) and model licensing ([docs/06-models-and-licensing.md](docs/06-models-and-licensing.md)). Moving to another PC: [docs/07-moving-to-another-pc.md](docs/07-moving-to-another-pc.md).
 
 ## Run
 

@@ -21,3 +21,6 @@ decisions/
 
 # Written by the agent (and by tests that import it)
 agent/agent_log.txt
+
+# Private migration bundle: .env, database and decisions (docs/07-moving-to-another-pc.md)
+migration/
