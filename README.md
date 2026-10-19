@@ -60,7 +60,7 @@ docker compose ps
 
 To reach the dashboard from outside your network, put your token from <https://dashboard.ngrok.com> into `NGROK_AUTHTOKEN` and run `docker compose up -d` again. Add Agent then shows the https URL. Free ngrok URLs change whenever ngrok restarts.
 
-More detail: [docs/04-docker.md](docs/04-docker.md). Moving to another PC: [docs/07-moving-to-another-pc.md](docs/07-moving-to-another-pc.md).
+More detail: [docs/04-docker.md](docs/04-docker.md). Moving to another PC: [docs/07-moving-to-another-pc.md](docs/07-moving-to-another-pc.md). Deploying on a PC that has only Docker (no source code, Intel or ARM): [deploy/deploy.md](deploy/deploy.md).
 
 ## Add devices (agents)
 

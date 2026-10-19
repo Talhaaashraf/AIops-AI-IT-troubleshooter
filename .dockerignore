@@ -18,3 +18,4 @@ migration
 agent_builds
 agent/agent_config.json
 agent/agent_log.txt
+dist
