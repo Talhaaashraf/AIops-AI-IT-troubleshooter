@@ -7,10 +7,6 @@
 name: sentinel
 
 services:
-    web:
-      container_name: sentinel-web
-      image: nginx:1.27-alpine
-      restart: unless-stopped
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
