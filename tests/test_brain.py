@@ -1,7 +1,6 @@
 import asyncio
 import json
 import pathlib
-import re
 
 import pytest
 
@@ -53,11 +52,22 @@ def test_a_filtered_out_fix_turns_its_solution_manual():
 
 
 def test_no_code_path_applies_a_fix_without_a_person():
-    """apply_fix may only be called from the approval endpoint, and the auto-fix setting is gone."""
+    """apply_fix is reached only from the approval endpoint (through its wrapper), and the auto-fix setting is gone."""
+    import ast
+
     sources = {path: path.read_text(encoding="utf-8") for path in (ROOT / "backend").rglob("*.py")}
-    callers = [(path.name, line.strip()) for path, text in sources.items() for line in text.splitlines()
-               if re.search(r"\bapply_fix\(", line) and not line.strip().startswith(("def ", "async def ", "#"))]
-    assert callers == [("main.py", '_spawn(apply_fix(session_id, index, approved_by="operator"))')]
+
+    def callers_of(name):
+        found = set()
+        for path, text in sources.items():
+            for function in ast.walk(ast.parse(text)):
+                if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                        isinstance(call, ast.Call) and getattr(call.func, "id", None) == name for call in ast.walk(function)):
+                    found.add(f"{path.name}:{function.name}")
+        return found
+
+    assert callers_of("apply_fix") == {"main.py:_apply_approved_fix"}
+    assert callers_of("_apply_approved_fix") == {"main.py:troubleshoot_apply_fix"}
     assert not any("AUTO_FIX_MAX_RISK" in text or "_auto_fix" in text for text in sources.values())
 
 
@@ -117,8 +127,6 @@ def test_streamed_reply_forwards_thinking_and_returns_the_answer(monkeypatch):
 
 
 def test_reasoning_that_used_the_whole_budget_is_written_up_by_a_second_call(monkeypatch):
-    from backend.agent_brain import executor
-
     calls = []
 
     class ThinkingProvider:

@@ -245,20 +245,20 @@ def _linux_install(update_ids):
     offered = {item["id"] for item in current.get("updates") or []}
     chosen = [item for item in wanted if item in offered]
     gone = [item for item in wanted if item not in offered]
-    if wanted and not chosen:
+    if not chosen:
         return {"ok": True, "changed": False, "summary": "None of these updates is offered any more (already installed?)", "data": {"no_longer_offered": gone}}
     env = {"DEBIAN_FRONTEND": "noninteractive", "LC_ALL": "C"}
     if current.get("source") == "apt":
-        command = ["apt-get", "install", "--only-upgrade", "-y", "-o", "Dpkg::Options::=--force-confold", *chosen] if chosen else ["apt-get", "upgrade", "-y", "-o", "Dpkg::Options::=--force-confold"]
+        command = ["apt-get", "install", "--only-upgrade", "-y", "-o", "Dpkg::Options::=--force-confold", *chosen]
     else:
         command = [current.get("source") or "dnf", "upgrade", "-y", *chosen]
     code, out, err = _run(command, INSTALL_TIMEOUT, env=env)
     restart = os.path.exists("/var/run/reboot-required")
-    summary = (f"Updated {len(chosen) or 'all'} package(s)" if code == 0 else f"Update failed (exit code {code}): {_tail(err or out, 200)}")
+    summary = (f"Updated {len(chosen)} package(s)" if code == 0 else f"Update failed (exit code {code}): {_tail(err or out, 200)}")
     if restart and code == 0:
         summary += "; restart the computer to finish (AIops never restarts it for you)"
     return {"ok": code == 0, "changed": code == 0, "summary": summary,
-            "data": {"packages": chosen or "all", "no_longer_offered": gone, "restart_required": restart, "output": _tail(out or err)}}
+            "data": {"packages": chosen, "no_longer_offered": gone, "restart_required": restart, "output": _tail(out or err)}}
 
 
 @tool("install_os_updates", "Download and install operating system updates a person approved (Windows Update or apt/dnf). Only updates a fresh search still offers are installed; the computer is never restarted.",

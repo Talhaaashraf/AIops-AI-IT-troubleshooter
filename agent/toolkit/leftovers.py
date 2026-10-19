@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -86,7 +87,7 @@ def remember_uninstalled(entry_id, info):
     """Called after a successful uninstall: the uninstall registry entry is gone afterwards, so keep what a
     leftover scan needs (name, publisher, install folder). Never raises."""
     try:
-        records = _read_json(_uninstalled_file(), {})
+        records = _read_agent_json(_uninstalled_file(), {})
         records[str(entry_id)] = {**info, "removed_at": time.time()}
         newest = sorted(records.items(), key=lambda item: item[1].get("removed_at", 0), reverse=True)[:UNINSTALLED_KEPT]
         _write_json(_uninstalled_file(), dict(newest))
@@ -379,6 +380,15 @@ def _still_safe(candidate):
     return _exists(Path(candidate["path"])) and key not in _protected_paths() and not key.startswith(storage + os.sep) and key != storage
 
 
+def _is_link(path):
+    """A symlink, junction or any other reparse point (Python 3.11 cannot see junctions otherwise)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def _same_volume(first, second):
     try:
         return os.stat(first).st_dev == os.stat(second).st_dev
@@ -386,12 +396,63 @@ def _same_volume(first, second):
         return False
 
 
-def _is_link(path):
-    return os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path))
+SYSTEM_OWNERS = {"S-1-5-18", "S-1-5-32-544"}  # SYSTEM, Administrators
 
 
-def _has_links(path, limit=20000):
-    """True if the item is, or contains, a symlink or junction (checked without following them)."""
+def _owner(path):
+    """Owner of a file or folder: a SID string on Windows, a uid elsewhere; None when unknown."""
+    if os_name() != "Windows":
+        try:
+            return os.lstat(path).st_uid
+        except OSError:
+            return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.POINTER(ctypes.c_void_p)
+    advapi32.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, pointer, pointer, pointer, pointer, pointer]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, pointer]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    owner, descriptor, text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION = 1
+    if advapi32.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)) != 0:
+        return None
+    try:
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+            return None
+        try:
+            return ctypes.wstring_at(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _written_by_agent(path):
+    """True when a scan or quarantine manifest was written by this agent (or an administrator), not planted
+    by another user. Checked before trusting one, whatever the folder's permissions are."""
+    if _is_link(path):
+        return False
+    owner = _owner(path)
+    if owner is None:
+        return False
+    trusted = SYSTEM_OWNERS if os_name() == "Windows" else {0}
+    return owner in trusted or owner == _owner(storage_root())
+
+
+def _read_agent_json(path, default):
+    return _read_json(path, default) if _written_by_agent(path) else default
+
+
+def _has_links(path, limit=50000):
+    """True if the item is, or contains, a symlink or junction (checked without following them), or is too big
+    to check. Such items are never moved: a copy across drives, or anything that later walks the item as
+    SYSTEM, would follow the link into wherever it points."""
     if _is_link(path):
         return True
     seen = 0
@@ -415,8 +476,8 @@ def purge_expired(older_than_days=QUARANTINE_DAYS):
         return removed
     cutoff = time.time() - older_than_days * 86400
     for batch in root.iterdir():
-        manifest = _read_json(batch / "manifest.json", {})
-        if _is_dir(batch) and BATCH_ID.match(batch.name) and manifest.get("created", time.time()) < cutoff:
+        manifest = _read_agent_json(batch / "manifest.json", {})
+        if manifest and _is_dir(batch) and not _is_link(batch) and BATCH_ID.match(batch.name) and manifest.get("created", time.time()) < cutoff:
             shutil.rmtree(batch, ignore_errors=True)
             removed.append(batch.name)
     return removed
@@ -430,7 +491,7 @@ def purge_expired(older_than_days=QUARANTINE_DAYS):
       params={"id": {"type": "string", "maxLength": 600, "description": "Inventory id of the uninstalled program"}}, required=("id",), timeout=300, ai_visible=False)
 def find_leftovers(id):  # noqa: A002 - matches the tool's public parameter name
     system = os_name()
-    record = _read_json(_uninstalled_file(), {}).get(str(id))
+    record = _read_agent_json(_uninstalled_file(), {}).get(str(id))
     if system == "Windows":
         from . import software
 
@@ -482,7 +543,7 @@ def quarantine_leftovers(scan_id, candidate_ids):
     if not SCAN_ID.match(scan_id):
         return {"ok": False, "summary": "Invalid scan id"}
     scan_file = _scans_dir() / f"{scan_id}.json"
-    scan = _read_json(scan_file, None)
+    scan = _read_agent_json(scan_file, None)
     if not scan or time.time() - scan.get("created", 0) > SCAN_TTL_SECONDS:
         return {"ok": False, "summary": "That leftover scan expired or is unknown on this device. Scan again."}
     wanted = [item.strip() for item in candidate_ids.split(",") if item.strip()]
@@ -508,9 +569,10 @@ def quarantine_leftovers(scan_id, candidate_ids):
             if ok:
                 ok, message = _reg("delete", candidate["path"], "/f")
             entry.update(stored=str(stored), ok=ok, error=None if ok else message)
-        elif not _same_volume(candidate["path"], batch) and _has_links(candidate["path"]):
-            # A cross-drive move copies: it would follow the link into its target. Leave it to a person.
-            entry["error"] = "skipped: contains a shortcut link or junction and sits on another drive than the quarantine; remove it by hand"
+        elif _has_links(candidate["path"]):
+            entry["error"] = "skipped: it contains a shortcut link or junction (or is too big to check for one); remove it by hand"
+        elif candidate["kind"] == "folder" and not _same_volume(candidate["path"], batch):
+            entry["error"] = "skipped: a folder on another drive than the quarantine would have to be copied; remove it by hand"
         else:
             stored = batch / f"{cid}_{_safe_name(Path(candidate['path']).name)}"
             try:
@@ -539,7 +601,7 @@ def restore_quarantine(batch_id):
     if not BATCH_ID.match(batch_id):
         return {"ok": False, "summary": "Invalid batch id"}
     batch = _quarantine_dir() / batch_id
-    manifest = _read_json(batch / "manifest.json", None)
+    manifest = _read_agent_json(batch / "manifest.json", None) if not _is_link(batch) else None
     if not manifest:
         return {"ok": False, "summary": "That quarantine batch does not exist (it may have expired)."}
     restored, failed = 0, []
@@ -556,10 +618,14 @@ def restore_quarantine(batch_id):
             ok, message = (False, "the registry key exists again (was the program reinstalled?)") if exists else _reg("import", str(stored))
         elif _exists(Path(item["original"])):
             ok, message = False, "something already exists at the original location"
+        elif _has_links(str(stored)):
+            ok, message = False, "it now contains a shortcut link or junction; restore it by hand"
         else:
             try:
                 Path(item["original"]).parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(stored), item["original"])
+                # No permission changes: a move on the same drive keeps the item's own permissions, and a copy
+                # across drives inherits them from the original folder.
                 ok, message = True, ""
             except (OSError, shutil.Error) as error:
                 ok, message = False, str(error)[:300]
@@ -581,9 +647,9 @@ def list_quarantine():
     root = _quarantine_dir()
     batches = []
     for batch in sorted(root.iterdir(), reverse=True) if _is_dir(root) else []:
-        manifest = _read_json(batch / "manifest.json", None)
+        manifest = _read_agent_json(batch / "manifest.json", None) if not _is_link(batch) else None
         if not manifest or not BATCH_ID.match(batch.name):
-            continue
+            continue  # not a batch this agent wrote
         stored = [item for item in manifest["items"] if item.get("ok") and not item.get("restored")]
         created = manifest.get("created", 0)
         batches.append({

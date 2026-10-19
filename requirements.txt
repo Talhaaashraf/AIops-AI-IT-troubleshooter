@@ -1,8 +1,9 @@
-fastapi
-uvicorn[standard]
-psutil
-httpx
-groq
-python-dotenv
-websockets
-python-multipart
+# Versions the stack was tested with (Docker image, Python 3.12). Upgrade deliberately and re-run the tests.
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+psutil==7.2.2
+httpx==0.28.1
+groq==1.7.0
+python-dotenv==1.2.4
+websockets==17.2
+python-multipart==0.0.32

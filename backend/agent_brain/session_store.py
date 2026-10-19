@@ -141,13 +141,29 @@ def list_sessions(device_id=None, limit=30):
         return sessions
 
 
+INTERRUPTED_FIX_SUMMARY = ("Interrupted by a server restart before the device reported back. The fix may still have run: "
+                           "its result is recorded if the device reports it later. Check the device before running it again.")
+
+
 def mark_interrupted_sessions():
-    """Sessions left running by a server restart can never finish; close them out."""
+    """Sessions left running by a server restart can never finish; close them out. A fix that was running is
+    marked failed (outcome unknown) instead of staying "running", which would block both retry and reject."""
+    now = utc_now()
     with _connect() as connection:
-        connection.execute(
-            "UPDATE troubleshoot_sessions SET status = 'failed', error = 'Interrupted by a server restart', updated_at = ? WHERE status IN ('queued', 'running', 'fixing', 'verifying')",
-            (utc_now(),),
-        )
+        rows = connection.execute("SELECT session_id, report_json FROM troubleshoot_sessions WHERE status IN ('queued', 'running', 'fixing', 'verifying')").fetchall()
+        for row in rows:
+            report = _loads(row["report_json"])
+            if isinstance(report, dict):
+                for fix in report.get("proposed_fixes") or []:
+                    if fix.get("status") == "running":
+                        fix["status"], fix["result"] = "failed", {"ok": False, "summary": INTERRUPTED_FIX_SUMMARY, "interrupted": True}
+                for solution in report.get("solutions") or []:
+                    if solution.get("status") == "running":
+                        solution["status"] = "failed"
+            connection.execute(
+                "UPDATE troubleshoot_sessions SET status = 'failed', error = 'Interrupted by a server restart', report_json = ?, updated_at = ? WHERE session_id = ?",
+                (json.dumps(report, default=str) if report is not None else None, now, row["session_id"]),
+            )
         connection.commit()
 
 

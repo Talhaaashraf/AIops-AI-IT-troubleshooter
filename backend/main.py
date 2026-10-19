@@ -19,13 +19,12 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import decision_log, health_report, public_url, software_store, task_signals
-from .actions import run_action
+from . import decision_log, health_report, public_url, software_store, task_queue, task_signals
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
 from .agent_brain.executor import LOCAL_DEVICE_ID, execute, resolve_target
-from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, normalize_mode, run_diagnosis
+from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, normalize_mode, record_late_fix_result, run_diagnosis
 from .agent_brain.playbooks import get_playbook, public_playbooks
 from .learning import model_builder
 from .learning import store as learning_store
@@ -37,10 +36,9 @@ from .auth import SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_s
 from .collectors import collect_report
 from .device_store import claim_onboarding, create_pending_token, delete_device, get_device, get_device_by_token, get_latest_report, is_valid_install_token, list_devices, mark_offline_devices, register_device, save_report, set_onboarding_session
 from .event_logs import collect_event_log_report
-from .performance_checks import collect_performance_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
-from .task_queue import claim_next_task, complete_task, list_tasks
+from .task_queue import claim_next_task, complete_task, get_task, list_tasks, pending_change
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -71,7 +69,6 @@ previous_reports = {}
 chat_sessions = {}
 background_tasks = set()
 latest_security_report = None
-latest_performance_report = None
 latest_event_log_report = None
 
 SECURITY_REFRESH_SECONDS = 300
@@ -159,7 +156,6 @@ async def start_monitor():
         methods = ",".join(sorted(getattr(route, "methods", set()) or []))
         route_line = f"  {methods or 'WEBSOCKET'} {route.path}"
         logger.info(route_line)
-        print(route_line, flush=True)
     if auth_enabled():
         logger.info("Dashboard login is enabled (DASHBOARD_PASSWORD/ADMIN_API_KEY set).")
     else:
@@ -216,7 +212,7 @@ def warm_up_llm():
 async def monitor_loop():
     while True:
         try:
-            report = snapshot_with_alerts(collect_report())
+            report = snapshot_with_alerts(await asyncio.to_thread(collect_report))
             for connection in list(connections):
                 try:
                     await connection.send_json(report)
@@ -252,19 +248,6 @@ async def security_loop():
         except Exception:
             logger.exception("Security check failed")
         await asyncio.sleep(SECURITY_REFRESH_SECONDS)
-
-
-async def refresh_performance():
-    """Run the active benchmark suite. Called on demand only (see /api/diagnostics/performance);
-    unlike security or event-log checks it briefly writes to disk and uses CPU, so it never runs
-    on a timer here."""
-    global latest_performance_report
-    previous = latest_performance_report
-    report = await asyncio.to_thread(collect_performance_report)
-    for alert in evaluate_performance_rules(report, previous):
-        add_alert(alert, "local-server")
-    latest_performance_report = report
-    return report
 
 
 async def refresh_event_logs():
@@ -312,7 +295,7 @@ async def monitor(websocket: WebSocket):
         return
     connections.add(websocket)
     try:
-        await websocket.send_json(snapshot_with_alerts(collect_report()))
+        await websocket.send_json(snapshot_with_alerts(await asyncio.to_thread(collect_report)))
         while True:
             await websocket.receive_text()
     except (WebSocketDisconnect, Exception):
@@ -324,18 +307,6 @@ async def security():
     if latest_security_report is None:
         return await refresh_security()
     return latest_security_report
-
-
-@app.get("/api/diagnostics/performance")
-def performance():
-    if latest_performance_report is None:
-        return JSONResponse(status_code=404, content={"detail": "No performance test has run yet. POST to this endpoint to run one."})
-    return latest_performance_report
-
-
-@app.post("/api/diagnostics/performance")
-async def run_performance():
-    return await refresh_performance()
 
 
 @app.get("/api/diagnostics/logs")
@@ -416,7 +387,7 @@ def agent_report(payload: dict, request: Request):
         add_alert(alert, device_id)
     previous_reports[device_id] = diagnostics_payload
 
-    timestamp = str(payload.get("timestamp") or datetime.now(timezone.utc).isoformat())
+    timestamp = datetime.now(timezone.utc).isoformat()  # received at; the agent's clock may be off
     save_report(device_id, timestamp, diagnostics_payload, payload.get("spike_detected", False))
     if onboarding_enabled():
         _ensure_onboarding(device)
@@ -519,10 +490,18 @@ def _change_in_progress(device_id):
     for job in list(software_jobs.values()):
         if job["device_id"] == device_id and job["state"] == "running" and job.get("risk", "read") != "read":
             return f"{job['action']} of {job['name']}"
+    if device_id in fixes_starting:
+        return "approved fix"
+    queued = pending_change(device_id)
+    if queued:
+        return f"change ({queued})"
     for session in session_store.list_sessions(device_id, 20):
         if session["status"] == "fixing":
             return f"an approved fix for \"{session['issue'][:80]}\""
     return None
+
+
+fixes_starting = set()  # devices whose approved fix was accepted but has not finished yet
 
 
 def _refuse_if_changing(device_id):
@@ -542,6 +521,75 @@ def _start_software_job(target, action, name, tool_id, args, max_risk):
     software_jobs[job["job_id"]] = job
     _spawn(_run_software_job(job, target, tool_id, args, max_risk))
     return job
+
+
+def _record_change_result(device_id, label, tool_id, args, ok, summary, name=None, task_id=None):
+    """Audit row, decision record and inventory update for a finished Software/Performance change. For an
+    agent it runs when the result arrives (agent_task_result), so a server restart during a long change
+    cannot lose it; for this server it runs at the end of the job."""
+    if ok and tool_id == "uninstall_software":
+        software_store.mark_uninstalled(device_id, args.get("id"))
+    elif ok and tool_id == "update_software":
+        software_store.mark_updated(device_id, args.get("package_id"))
+    session_store.add_audit(None, device_id, tool_id, {**args, "name": name or tool_id}, "operator (Software/Performance tab)", ok, summary)
+    decision_log.record("software_action", device_id, {
+        "device": label, "device_id": device_id, "action": f"{tool_id} {name or ''}".strip(), "tool_id": tool_id, "args": args,
+        "approved_by": "operator", "state": "finished", "task_id": task_id, "ok": ok, "result": summary})
+
+
+def _change_name(device_id, tool_id, args):
+    """A readable name for a change recorded from an agent's result (the job that knew it may be gone).
+    Looked up before the inventory is updated, so an uninstalled program still has its name."""
+    software = (software_store.get_inventory(device_id) or {}).get("software") or []
+    if tool_id == "uninstall_software":
+        return next((item.get("name") for item in software if item.get("id") == args.get("id")), args.get("id"))
+    if tool_id == "update_software":
+        return next((item.get("name") for item in software if item.get("update_id") == args.get("package_id")), args.get("package_id"))
+    if tool_id == "install_os_updates":
+        count = len([item for item in str(args.get("update_ids") or "").split(",") if item])
+        return f"{count} OS update{'s' if count != 1 else ''}"
+    return None
+
+
+def _device_label(device_id):
+    device = get_device(device_id) or {}
+    return device.get("nickname") or device.get("hostname") or device_id
+
+
+def _after_task_result(device, task_id, result):
+    task = get_task(task_id)
+    tool = get_tool(task["tool_id"]) if task else None
+    if not task or tool is None or tool.risk == "read" or task["max_risk"] == "read":
+        return
+    label = device.get("nickname") or device.get("hostname") or device["device_id"]
+    if task.get("session_id"):
+        record_late_fix_result(task, result, label)  # no-op while the session is alive and records it itself
+    else:
+        args = task.get("args") or {}
+        _record_change_result(device["device_id"], label, task["tool_id"], args, bool(result.get("ok")), result.get("summary") or "",
+                              name=_change_name(device["device_id"], task["tool_id"], args), task_id=task_id)
+
+
+def _record_expired_change(task):
+    """A device-changing task whose result never arrived (the device went offline or rebooted, or the server
+    was down too long): put on record that its outcome is unknown."""
+    if not task:
+        return
+    label = _device_label(task["device_id"])
+    outcome = " The change may or may not have happened: check the device." if task.get("claimed_at") else " It did not run."
+    summary = ((task.get("result") or {}).get("summary") or "The device never reported a result.") + outcome
+    if task.get("session_id"):
+        record_late_fix_result(task, {"ok": False, "summary": summary}, label)  # only for a fix a restart interrupted
+        return
+    args = task.get("args") or {}
+    name = _change_name(task["device_id"], task["tool_id"], args)
+    session_store.add_audit(None, task["device_id"], task["tool_id"], {**args, "name": name or task["tool_id"]}, "operator (Software/Performance tab)", False, summary)
+    decision_log.record("software_action", task["device_id"], {
+        "device": label, "device_id": task["device_id"], "action": f"{task['tool_id']} {name or ''}".strip(), "tool_id": task["tool_id"], "args": args,
+        "approved_by": "operator", "state": "no result", "task_id": task["task_id"], "ok": False, "result": summary})
+
+
+task_queue.on_change_expired = _record_expired_change
 
 
 async def _run_software_job(job, target, tool_id, args, max_risk):
@@ -564,15 +612,17 @@ async def _run_software_job(job, target, tool_id, args, max_risk):
         summary = OLD_AGENT_MESSAGE
     if ok and tool_id == "installed_software":
         await asyncio.to_thread(software_store.save_inventory, target.device_id, result.get("data") or {})
-    elif ok and tool_id == "uninstall_software":
-        await asyncio.to_thread(software_store.mark_uninstalled, target.device_id, args["id"])
-    elif ok and tool_id == "update_software":
-        await asyncio.to_thread(software_store.mark_updated, target.device_id, args["package_id"])
     if changes_device:
-        await asyncio.to_thread(session_store.add_audit, None, target.device_id, tool_id, {**args, "name": job["name"]}, "operator (Software tab)", ok, summary)
-        await asyncio.to_thread(decision_log.record, "software_action", target.device_id, {
-            "device": target.label, "device_id": target.device_id, "action": f"{job['action']} {job['name']}", "tool_id": tool_id,
-            "args": args, "approved_by": "operator", "state": "finished", "job_id": job["job_id"], "ok": ok, "result": summary})
+        # An agent's result is recorded when it arrives (_after_task_result) and an expired task by
+        # _record_expired_change; only this server's own changes are recorded here.
+        task = await asyncio.to_thread(get_task, result["remote_task_id"]) if result.get("remote_task_id") else None
+        if task is None:
+            await asyncio.to_thread(_record_change_result, target.device_id, target.label, tool_id, args, ok, summary, job["name"])
+        elif task["status"] in ("queued", "running"):
+            await asyncio.to_thread(decision_log.record, "software_action", target.device_id, {
+                "device": target.label, "device_id": target.device_id, "action": f"{job['action']} {job['name']}", "tool_id": tool_id, "args": args,
+                "approved_by": "operator", "state": "waiting", "job_id": job["job_id"], "task_id": task["task_id"],
+                "result": "No result yet; the outcome is recorded when the device reports it."})
     data = result.get("data") if tool_id in JOB_DATA_TOOLS else None
     job.update(state="done" if ok else "failed", summary=summary, data=data, finished_at=datetime.now(timezone.utc).isoformat())
 
@@ -939,8 +989,8 @@ def download_agent(platform: str):
     filename, media_type = candidates[safe_platform]
 
     root = os.path.realpath(builds)
-    path = os.path.realpath(builds / folder / filename)
-    if os.path.commonpath([root, path]) != root:
+    path = Path(os.path.realpath(builds / folder / filename))
+    if os.path.commonpath([root, str(path)]) != root:
         raise HTTPException(status_code=400, detail="Invalid download path")
 
     if not path.exists():
@@ -973,14 +1023,6 @@ def agent_diagnose(payload: dict):
         raise HTTPException(status_code=503, detail=str(error)) from error
     _record_ai("health_analysis", LOCAL_DEVICE_ID, False, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")})
     return result
-
-
-@app.post("/api/agent/action")
-def agent_action(payload: dict):
-    try:
-        return run_action(payload.get("action_id"))
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/agent/chat")
@@ -1166,8 +1208,16 @@ async def troubleshoot_apply_fix(session_id: str, index: int):
     solutions = (session.get("report") or {}).get("solutions") or []
     if any(item.get("fix_index") == index and item.get("status") in ("rejected", "done") for item in solutions):
         raise HTTPException(status_code=409, detail="This solution was rejected or done by hand; it will not be run")
-    _spawn(apply_fix(session_id, index, approved_by="operator"))
+    fixes_starting.add(session["device_id"])  # only now: a refused request must not lock the device
+    _spawn(_apply_approved_fix(session_id, index, session["device_id"]))
     return {"accepted": True, "session_id": session_id, "index": index}
+
+
+async def _apply_approved_fix(session_id, index, device_id):
+    try:
+        await apply_fix(session_id, index, approved_by="operator")
+    finally:
+        fixes_starting.discard(device_id)
 
 
 @app.post("/api/troubleshoot/{session_id}/solutions/{index}/decision")
@@ -1243,7 +1293,12 @@ async def agent_task_result(task_id: str, payload: dict, request: Request):
         result["data"] = "(result data too large; truncated by server)"
     if not await asyncio.to_thread(complete_task, task_id, device["device_id"], result):
         raise HTTPException(status_code=409, detail="Task is not running for this device (expired or unknown)")
-    task_signals.notify(task_signals.task_key(task_id))
+    try:
+        await asyncio.to_thread(_after_task_result, device, task_id, result)
+    except Exception:  # the result itself is saved; never fail the agent's post because of the records
+        logger.exception("Could not record the result of task %s", task_id)
+    finally:
+        task_signals.notify(task_signals.task_key(task_id))
     return {"accepted": True}
 
 

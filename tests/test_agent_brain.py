@@ -72,7 +72,6 @@ def test_full_session_diagnose_fix_and_verify(monkeypatch):
     log = []
     monkeypatch.setattr(planner, "get_provider", lambda: provider)
     monkeypatch.setattr(planner, "execute", fake_execute(log))
-    monkeypatch.setenv("AUTO_FIX_MAX_RISK", "none")
 
     session_id = session_store.create_session("local", "test box", "Windows", "internet slow", None)
     asyncio.run(planner.run_diagnosis(session_id, mode="deep"))

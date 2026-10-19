@@ -7,7 +7,7 @@ by a person. Served from Docker behind nginx, published with ngrok.
 Status: `[ ]` todo · `[~]` in progress · `[x]` done and verified by the `aiops-reviewer` subagent.
 Plan: see the approved plan (phases 0-6). Update this file as work lands.
 
-Deployed: phases 0-5 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTHTOKEN). Phases 0-5 verified by the aiops-reviewer; the Phase 4 agent tools run on devices after the agent is reinstalled; the open [~] items need an ngrok token or the agent reinstall to verify.
+Deployed: phases 0-6 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTHTOKEN). Phases 0-6 verified by the aiops-reviewer; the Phase 4 agent tools run on devices after the agent is reinstalled; the open [~] items need an ngrok token or the agent reinstall to verify.
 
 ## Phase 0: Tracking and review
 
@@ -17,7 +17,7 @@ Deployed: phases 0-5 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTH
 
 ## Phase 1: Hosting (Docker + nginx + ngrok)
 
-- [x] nginx reverse proxy (`deploy/nginx/aiops.conf`): WebSockets, 900 s timeouts for AI calls, login rate limit
+- [x] nginx reverse proxy (`deploy/nginx/aiops.conf`): WebSockets, 3600 s timeouts for AI calls, login rate limit
 - [~] `docker-compose.yml`: `nginx` on port 80, `ngrok` service (port 8000 stays open until agents are reinstalled)
 - [x] Proxy headers in uvicorn so the app sees the https ngrok host
 - [~] Public URL discovered from the ngrok API and shown in Add Agent
@@ -62,7 +62,17 @@ Deployed: phases 0-5 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTH
 
 ## Phase 6: Rebuild, reinstall, review
 
-- [ ] Agent exe rebuilt, `docker compose up -d --build`
-- [ ] Agent reinstalled on the laptop (user, Administrator PowerShell)
-- [ ] `aiops-reviewer` reports all PASS
-- [ ] README and docs updated
+- [x] Agent exe rebuilt (toolkit 1.4.0), `docker compose up -d --build`
+- [ ] Agent reinstalled (user, Administrator PowerShell): do it on the new PC after the move ([docs/07](docs/07-moving-to-another-pc.md)); the new installer also locks the agent folder. On the old laptop the agent's folder keeps its old permissions until the agent is reinstalled or uninstalled there
+- [x] `aiops-reviewer`: a final whole-project review plus four focused re-checks. Every finding was fixed; the last round's fixes were verified with scripted race, junction and corrupt-manifest tests (installer) and unit tests
+- [x] README and docs updated: README rewritten, docs/03-06 brought up to date, docs/07 (moving to another PC), docs/08 (the replan)
+- [x] Review fixes:
+  - the Windows agent folder is created under a random name, locked to SYSTEM and Administrators, checked, then renamed into place (the install stops if another process interferes). An existing folder is moved aside and never walked, and only agent-written quarantine batches are carried over;
+  - the agent trusts only scans and quarantine manifests it wrote, and sees every reparse point as a link;
+  - approvals and results are recorded even across server restarts, with an unknown outcome when a result never arrives;
+  - one change at a time, also checked against the task table;
+  - interrupted fixes are no longer stuck;
+  - restored leftovers keep their own permissions (nothing walks or resets them), and uninstallers keep the quarantine;
+  - the download button works, and last-seen uses the server clock;
+  - dead code removed, versions pinned
+- [x] The Adobe Acrobat uninstall at 09:29 UTC (a dashboard click) lost its record in a server restart: backfilled from the task log and labelled "recorded afterwards"

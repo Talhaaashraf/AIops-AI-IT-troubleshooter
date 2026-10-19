@@ -1,9 +1,9 @@
-# AIops: dashboard + agentic AI troubleshooter + local Ollama brain.
-#   docker compose up -d --build      then open http://localhost:8000
+# AIops: dashboard + AI troubleshooter (suggests, a person approves) + local Ollama brain.
+#   docker compose up -d --build      then open http://localhost (nginx)
 #
-# The base model is loaded from ./models/<model-name>/ (see models/migrate_model.py),
-# so no model download is needed. The self-improving model (sentinel-tech) is
-# created in the same Ollama by the app and its Modelfile is written to ./models/sentinel-tech/.
+# model-init loads the base model from ./models/<model-name>/ when that folder exists (offline installs,
+# see models/migrate_model.py) and otherwise pulls it. The app then builds its own model, aiops-brain, in the
+# same Ollama and writes its Modelfile to ./models/aiops-brain/.
 name: sentinel
 
 services:

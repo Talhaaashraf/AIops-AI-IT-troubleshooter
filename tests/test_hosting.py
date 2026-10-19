@@ -31,3 +31,27 @@ def test_public_paths_are_exact():
 
     assert is_public_path("/api/agents/report") and is_public_path("/api/agents/tasks/next") and is_public_path("/static/app.js")
     assert not is_public_path("/api/agents/report1/onboarding") and not is_public_path("/api/agents/registerx")
+
+
+def test_windows_installer_locks_the_agent_folder_to_system_and_administrators():
+    """ProgramData lets every user create files; the SYSTEM agent's folder must not. The folder is created under
+    an unpredictable name with its permissions set at creation, checked, then renamed into place (a rename fails
+    if anything appeared meanwhile); an existing folder is renamed aside and never walked."""
+    import pathlib
+
+    script = (pathlib.Path(__file__).resolve().parent.parent / "backend" / "install_templates" / "windows.ps1").read_text(encoding="utf-8")
+    block = script[script.index("# --- agent folder (begin) ---"):script.index("# --- agent folder (end) ---")]
+    assert "$LockSddl = 'O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" in block and "$TrustedOwners = @('S-1-5-18', 'S-1-5-32-544')" in block
+    create, check, rename, recheck = (block.index(text) for text in (
+        "[IO.Directory]::CreateDirectory($staging, $security)", "Assert-LockedFolder $staging",
+        "Rename-Item -LiteralPath $staging", "Assert-LockedFolder $InstallDir"))
+    assert create < check < rename < recheck and "NewGuid()" in block.split("$staging =")[1].splitlines()[0]
+    assert "$OldDir = \"$InstallDir.old-$([guid]::NewGuid()" in block  # not predictable
+    assert "AreAccessRulesProtected" in block and "ReparsePoint" in block
+    assert "icacls" not in script and "/T" not in block and "Remove-Item" not in block  # nothing walks an old folder
+    assert "Test-TrustedItem $manifestPath" in block  # only quarantine batches the agent wrote
+    # After a failure the old task starts only when this installer knows the old folder is back; otherwise it is disabled.
+    assert "Resume-OldAgent $putBack" in block and "Resume-OldAgent $true" in block and "Disable-ScheduledTask" in block
+    assert "$movedAside = $true" in block  # the rename's own success, not "the path exists again"
+    assert "Test-TrustedItem (Join-Path $OldDir 'app')" in block  # no reads or deletes through a planted app junction
+    assert script.index("Stop-ScheduledTask") < script.index("# --- agent folder (begin) ---") and script.index("# --- agent folder (end) ---") < script.index("Invoke-WebRequest")

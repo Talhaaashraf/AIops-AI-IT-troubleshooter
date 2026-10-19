@@ -24,3 +24,10 @@ agent/agent_log.txt
 
 # Private migration bundle: .env, database and decisions (docs/07-moving-to-another-pc.md)
 migration/
+
+# Generated at runtime: AIops' own model (lessons hold ticket text) and the old sentinel-tech model
+models/aiops-brain/
+models/sentinel-tech/
+
+# An agent run from the repo writes its token here
+agent/agent_config.json

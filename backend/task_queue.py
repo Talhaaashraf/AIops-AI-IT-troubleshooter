@@ -6,6 +6,7 @@ long-polls /api/agents/tasks/next, runs the tool from its own local registry
 """
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -60,10 +61,15 @@ def enqueue_task(device_id, tool_id, args, max_risk, timeout_seconds, session_id
     return task_id
 
 
+# Set by the server: called with each device-changing task that expires, so its outcome is on record.
+on_change_expired = None
+
+
 def expire_stale_tasks():
     now = _now()
+    expired_changes = []
     with _connect() as connection:
-        rows = connection.execute("SELECT task_id, status, created_at, claimed_at, timeout_seconds FROM agent_tasks WHERE status IN ('queued', 'running')").fetchall()
+        rows = connection.execute("SELECT task_id, status, created_at, claimed_at, timeout_seconds, max_risk FROM agent_tasks WHERE status IN ('queued', 'running')").fetchall()
         for row in rows:
             if row["status"] == "queued":
                 stale = datetime.fromisoformat(row["created_at"]) + timedelta(seconds=CLAIM_TIMEOUT_SECONDS) < now
@@ -73,8 +79,31 @@ def expire_stale_tasks():
                 reason = "The device started the task but never reported a result."
             if stale:
                 result = {"tool_id": None, "ok": False, "summary": reason, "data": None}
-                connection.execute("UPDATE agent_tasks SET status = 'expired', result_json = ?, completed_at = ? WHERE task_id = ?", (json.dumps(result), now.isoformat(), row["task_id"]))
+                cursor = connection.execute(
+                    "UPDATE agent_tasks SET status = 'expired', result_json = ?, completed_at = ? WHERE task_id = ? AND status = ?",
+                    (json.dumps(result), now.isoformat(), row["task_id"], row["status"]),
+                )
+                if cursor.rowcount == 1 and row["max_risk"] != "read":
+                    expired_changes.append(row["task_id"])
         connection.commit()
+    for task_id in expired_changes:
+        if on_change_expired:
+            try:
+                on_change_expired(get_task(task_id))
+            except Exception:  # recording must never break task handling
+                logging.getLogger(__name__).exception("Could not record expired task %s", task_id)
+
+
+def pending_change(device_id):
+    """The tool id of a queued or running device-changing task, or None. Lives in the database, so it
+    survives server restarts (the agent keeps running a change while the server is down)."""
+    expire_stale_tasks()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT tool_id FROM agent_tasks WHERE device_id = ? AND status IN ('queued', 'running') AND max_risk != 'read' ORDER BY created_at LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        return row["tool_id"] if row else None
 
 
 def claim_next_task(device_id):

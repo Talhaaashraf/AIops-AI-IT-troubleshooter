@@ -14,3 +14,7 @@ agent_build_work
 .pytest_cache
 docs
 decisions
+migration
+agent_builds
+agent/agent_config.json
+agent/agent_log.txt

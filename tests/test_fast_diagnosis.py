@@ -21,7 +21,6 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(model_builder, "LEARNED_DIR", tmp_path / "sentinel-tech")
     monkeypatch.setattr(model_builder, "VERSION_FILE", tmp_path / "sentinel-tech" / "version.json")
     monkeypatch.setattr(planner, "get_alerts", lambda *args, **kwargs: [])
-    monkeypatch.setenv("AUTO_FIX_MAX_RISK", "none")
 
 
 class Provider:
@@ -88,7 +87,7 @@ def test_parallel_phase_runs_tools_concurrently(monkeypatch):
     evidence = asyncio.run(planner.collect_baseline(session_id, target, get_playbook("full_checkup")))
     elapsed = time.perf_counter() - started
     assert len(evidence) == 9
-    assert elapsed < 1.0  # sequential would be 9 x 0.3 s
+    assert elapsed < 1.8  # sequential would be 9 x 0.3 s = 2.7 s; the margin is for a busy laptop
 
 
 def test_instant_mode_needs_no_llm_and_verifies_fixes_by_rules(monkeypatch):

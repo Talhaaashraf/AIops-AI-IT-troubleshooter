@@ -1701,7 +1701,7 @@ function renderLeftovers(advice) {
   }).join('');
   panel.innerHTML = `
     <div class="section-heading">
-      <div><p class="kicker">Remove completely · step 2 of 2</p><h2>${escapeHtml(data.program)} left ${data.count} item${data.count === 1 ? '' : 's'} behind (${escapeHtml(data.total_size_text)})</h2>
+      <div><p class="kicker">Remove completely · step 2 of 2</p><h2>${escapeHtml(data.program)} left ${Number(data.count) || 0} item${Number(data.count) === 1 ? '' : 's'} behind (${escapeHtml(data.total_size_text)})</h2>
         <p class="soft-label">Tick what to remove. Ticked items move to a quarantine you can restore for 7 days; registry keys are exported to .reg files first. Low-confidence matches start unticked.${advice ? ' The AI unticked items it advises keeping.' : ''}</p>
         ${advice?.summary ? `<p class="lo-summary">${escapeHtml(advice.summary)}</p>` : ''}</div>
       <div class="button-row">
@@ -1760,7 +1760,7 @@ async function loadQuarantine() {
     if (job.state !== 'done') throw new Error(job.summary || 'Could not read the quarantine');
     const batches = job.data?.batches || [];
     swSetStatus(job.summary);
-    panel.innerHTML = `<div class="section-heading"><div><p class="kicker">Quarantine · restorable for ${job.data?.days || 7} days</p><h2>${batches.length} batch${batches.length === 1 ? '' : 'es'}</h2></div><button class="ghost-button" type="button" data-q-close>Close</button></div>`
+    panel.innerHTML = `<div class="section-heading"><div><p class="kicker">Quarantine · restorable for ${Number(job.data?.days) || 7} days</p><h2>${batches.length} batch${batches.length === 1 ? '' : 'es'}</h2></div><button class="ghost-button" type="button" data-q-close>Close</button></div>`
       + (batches.length ? `<div class="table-wrap flat"><table><thead><tr><th>Program</th><th>Moved</th><th>Items</th><th>Size</th><th>Restorable until</th><th></th></tr></thead><tbody>${batches.map((batch) => `
         <tr><td><strong>${escapeHtml(batch.program || '--')}</strong><small class="lo-paths">${batch.paths.map((path) => escapeHtml(path)).join('<br>')}</small></td>
           <td>${escapeHtml(new Date(batch.created).toLocaleString())}</td><td>${Number(batch.items)}</td><td>${escapeHtml(batch.size_text)}</td>
@@ -2436,6 +2436,7 @@ const DECISION_LABELS = {
   diagnosis: 'Diagnosis', fix_approved: 'Fix approved', fix_rejected: 'Solution rejected', fix_done_manually: 'Done by hand',
   fix_result: 'Fix result', health_analysis: 'Health analysis', log_analysis: 'Log analysis', chat_answer: 'Chat answer',
   software_action: 'Software action', performance_analysis: 'Performance analysis', model_switch: 'Model switch',
+  leftover_review: 'Leftover review',
 };
 
 // Who a decision belongs to when no approver is recorded: rejections are people, results are re-checks.

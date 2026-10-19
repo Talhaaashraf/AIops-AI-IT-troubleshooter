@@ -24,7 +24,7 @@ import os
 import re
 import time
 
-from agent.toolkit import get_tool, list_tools, risk_rank, tool_schemas
+from agent.toolkit import get_tool, list_tools, tool_schemas
 from agent.toolkit.registry import validate_args
 from agent.toolkit.remediation import PROTECTED_PROCESSES, RESTARTABLE_SERVICES
 
@@ -815,6 +815,29 @@ async def apply_fix(session_id, index, approved_by="operator"):
                 "verdict": "The fix failed on the device", "resolved": False, "method": "none"})
     await learn_from(session_id)
     return fix
+
+
+def record_late_fix_result(task, result, device_label):
+    """An approved fix whose result reached the server after a restart: the coroutine that would have
+    recorded it is gone, so record it here (audit row, decision, fix status). Returns False when the
+    session is still running and records the result itself."""
+    session = session_store.get_session(task["session_id"], include_steps=False)
+    if not session or session["status"] in ("queued", "running", "fixing", "verifying"):
+        return False
+    report = session.get("report") or {}
+    for index, fix in enumerate(report.get("proposed_fixes") or []):
+        if fix.get("tool_id") == task["tool_id"] and (fix.get("args") or {}) == (task.get("args") or {}) and (fix.get("result") or {}).get("interrupted"):
+            fix["status"], fix["result"] = ("applied" if result.get("ok") else "failed"), result
+            _set_solution_status(report, index, fix["status"])
+            session_store.update_session(task["session_id"], report=report)
+            break
+    else:
+        return False  # not a fix a restart interrupted: the session already recorded it
+    session_store.add_audit(task["session_id"], task["device_id"], task["tool_id"], task.get("args") or {}, "operator (approved before a server restart)", result.get("ok"), result.get("summary"))
+    decision_log.record("fix_result", task["session_id"], {
+        "device": device_label, "device_id": task["device_id"], "action": task["tool_id"], "result": result.get("summary"),
+        "verdict": "The result arrived after a server restart and was not re-verified", "resolved": None, "method": "late result"})
+    return True
 
 
 def _set_solution_status(report, fix_index, status):

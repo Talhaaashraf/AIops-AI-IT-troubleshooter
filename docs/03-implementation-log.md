@@ -18,7 +18,7 @@
 ## Safety design
 
 - The LLM never reaches a shell. It can only name registered tools, and their arguments are validated against a schema.
-- During investigation the model only sees **read** tools. Fixes are proposals; they run when an operator clicks **Apply**, or automatically up to `AUTO_FIX_MAX_RISK` (default `none`).
+- During investigation the model only sees **read** tools. Fixes are proposals that run when an operator clicks **Apply**. (The `AUTO_FIX_MAX_RISK` auto-apply option from this first version was removed in the replan below: nothing runs without a person's approval.)
 - `restart_service` uses an allow-list. `kill_process` needs both the PID and the exact process name, and refuses system processes.
 - Every fix is written to the remediation audit log (`GET /api/troubleshoot/audit`).
 
@@ -102,3 +102,45 @@ Measured on the dev laptop (i5-1235U, Docker, qwen2.5:3b, laptop under heavy loa
 | Fast, full check-up, server container | 3 s | 23 s | 26 s |
 
 Still not verified: temperature readings need the agent to run as SYSTEM/Administrator (the test agent ran as a normal user). The 3B model can still draw a weak link between findings (for example blaming a firmware device for heat); `qwen2.5:7b` reasons better if RAM allows.
+
+## AI-driven replan (2026-10-14 to 2026-10-16)
+
+The app was reshaped into an AI-driven troubleshooter that only suggests, hosted behind nginx and ngrok. [task.md](../task.md) tracks every item. Each phase was checked by the read-only `aiops-reviewer` subagent (`.claude/agents/aiops-reviewer.md`) before its boxes were ticked.
+
+| Phase | Result | Where |
+| --- | --- | --- |
+| 0. Tracking | `task.md`, the reviewer subagent, and the live checks moved into the repo. | `tests/e2e/` |
+| 1. Hosting | nginx on port 80 (WebSockets, long timeouts, rate-limited login). ngrok publishes it on https. The app reads the ngrok URL for install commands. Agents send `ngrok-skip-browser-warning`. The session cookie is `Secure` over https. | `deploy/nginx/`, `docker-compose.yml`, `backend/public_url.py` |
+| 2. Decisions folder | Every AI decision, approval, rejection and result is written as JSON, with a daily `index.md`, and shown in the Decisions tab. | `backend/decision_log.py` |
+| 3. AI brain | Covers four things: (1) `aiops-brain` built at startup from the selected base model and the principles; (2) deep thinking for diagnosis reports, streamed live; (3) 3-4 ranked solutions with Approve & run / Mark as done / Reject; (4) auto-fix removed, with a test pinning every code path that can change a device. | `backend/llm/brain.py`, `backend/agent_brain/planner.py`, `backend/learning/model_builder.py` |
+| 4. Full removal | After an uninstall, leftovers are found, moved to a 7-day quarantine (registry keys exported first) and can be restored. Purged daily. | `agent/toolkit/leftovers.py` |
+| 5. Performance tab | A full read-only test per device: benchmark, start-up (`boot_performance`), hardware, disks, battery, input devices (`input_devices`), and OS and app updates (`os_updates`, `install_os_updates`). It adds keyboard and mouse testers, and an AI analysis that starts from the test results. | `agent/toolkit/updates.py`, `backend/main.py`, `frontend/` |
+| 6. Wrap-up | Covers: (1) a final whole-project review and re-check; (2) the Windows agent folder locked to SYSTEM and Administrators; (3) approvals and results recorded even across server restarts; (4) one change at a time per device, also from the task table; (5) dead code removed and versions pinned; (6) rebuilt agent (toolkit 1.4.0), updated README and docs, migration guide. | `backend/main.py`, `backend/install_templates/` |
+
+### Test results
+
+- 118 unit tests pass.
+- The headless-browser check passes 36 of 36 against the live stack, covering every tab.
+- The full-removal check passes 9 of 9 on a dummy program ("Contoso TestApp"; the agent refuses names containing "aiops").
+- A real AI performance analysis finished end to end with 4 suggestions and was recorded as `performance_analysis`.
+
+### Deviations from the plan, and why
+
+- **Thinking costs minutes on a laptop CPU.** Fast mode keeps one AI report, with thinking on, as the default. Deep mode, where the AI also runs extra checks, is opt-in. If thinking uses up its token budget before the answer, its reasoning is handed to a short second call that only writes the answer.
+- **Ollama ignores a Modelfile's system prompt** whenever a request has its own system message. The brain's principles are therefore repeated in every request prompt.
+- **Leftover scans read user registry hives through `HKU\<SID>`**, not `HKCU`. Scanning both listed every key twice.
+- **nginx allows one hour per request** (the plan said 900 s), because a deep diagnosis on a laptop CPU can take longer.
+- **Port 8000 stays published** until every agent is reinstalled, because agents installed before nginx report to `:8000`. Then it becomes `127.0.0.1:8000:8000`.
+- **The dev laptop runs `qwen3:4b`.** With 16 GB of RAM and WSL/Docker using most of it, `qwen3:8b` did not fit.
+- **Rules were adjusted after the review.**
+  - A slow start-up is judged by when the desktop was ready, not total boot time.
+  - Pending security updates are medium, not high.
+  - A touchpad's extra "mouse" entry and Intel's hotkey filter no longer count as separate devices.
+  - Headless machines no longer raise "no keyboard".
+
+### Not yet verified
+
+- ngrok: no authtoken has been set yet.
+- `install_os_updates` has never run for real. It is covered by unit tests and a PowerShell parse check, and the browser check cancels every install dialog.
+- The Phase 4 and 5 agent tools through an installed agent: the agent installed on the dev laptop is 1.3.0, and 1.4.0 needs a reinstall. Boot timing needs the agent's SYSTEM rights.
+- The Linux and macOS paths of the new tools have unit tests only.

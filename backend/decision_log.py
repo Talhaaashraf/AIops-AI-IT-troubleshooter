@@ -37,6 +37,12 @@ def prompt_hash(messages):
 
 
 def _summary(kind, payload):
+    if kind == "software_action" and payload.get("state"):
+        # A change is recorded twice: when it is approved, and when its result arrives.
+        text = f"{str(payload['state']).capitalize()}: {payload.get('action') or payload.get('tool_id')}"
+        if payload.get("result"):
+            text += f" -> {payload['result']}"
+        return " ".join(text.split())[:160]
     for key in ("summary", "root_cause", "action", "title", "verdict"):
         if payload.get(key):
             return " ".join(str(payload[key]).split())[:160]
