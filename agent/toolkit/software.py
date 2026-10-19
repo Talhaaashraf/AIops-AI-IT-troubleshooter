@@ -27,7 +27,9 @@ INNO_UNINSTALLER = re.compile(r"unins\d{3}\.exe", re.IGNORECASE)
 SKIPPED_RELEASE_TYPES = {"update", "hotfix", "security update", "service pack"}
 # Never remove the agent itself, or packages whose removal takes the OS or the agent down with it.
 PROTECTED_NAMES = ("aiops", "sentinel", "devicehealthagent")
-PROTECTED_PACKAGES = re.compile(r"^(python3(\.\d+)?|python3-minimal|libc6|libc-bin|systemd|systemd-sysv|apt|dpkg|rpm|dnf|yum|bash|coreutils|sudo|openssh-server|linux-image.*|kernel.*|glibc|util-linux)$")
+# Docker and containerd too: on the server AIops runs in containers, so removing them takes AIops down.
+PROTECTED_PACKAGES = re.compile(r"^(python3(\.\d+)?|python3-minimal|libc6|libc-bin|systemd|systemd-sysv|apt|dpkg|rpm|dnf|yum|bash|coreutils|sudo|openssh-server|linux-image.*|kernel.*|glibc|util-linux"
+                                r"|docker-ce|docker-ce-cli|docker\.io|docker-compose-plugin|docker-buildx-plugin|containerd(\.io)?|runc)$")
 # Removing these breaks winget/the Store itself (winget would report them as uninstallable).
 PROTECTED_WINGET_IDS = re.compile(r"^Microsoft\.(AppInstaller|DesktopAppInstaller|WindowsStore|VCLibs.*|UI\.Xaml.*|WindowsAppRuntime.*)$", re.IGNORECASE)
 UNINSTALL_WAIT_SECONDS = 180  # Inno Setup uninstallers hand off to a temp copy and exit at once

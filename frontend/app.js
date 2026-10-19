@@ -131,7 +131,8 @@ function connectMonitor() {
       return;
     }
     renderReport(data);
-    setConnection('connected', renderServerSource(data.source));
+    // The server's agent stopped reporting: its last report is shown, but it is not live.
+    setConnection(data.source?.stale ? 'error' : 'connected', renderServerSource(data.source));
   };
   socket.onclose = () => {
     clearTimeout(monitorWatchdog);
@@ -1899,7 +1900,9 @@ async function generateToken(wait = true) {
     const data = await readJson(await fetch('/api/agents/generate-token', { method: 'POST' }));
     generatedToken = data.token;
     generatedTokenExpires = Date.parse(data.expires_at) || 0;
-    result.textContent = `Token ready (single use, expires ${new Date(data.expires_at).toLocaleString()})`;
+    // Not kept across reloads on purpose: a device may have claimed it meanwhile, and a token a device owns
+    // re-installs that device, so a second device would take over the first one's identity.
+    showTokenReady();
     if (wait) waitForNewDevice();
   } catch (error) {
     generatedToken = '';
@@ -1907,6 +1910,12 @@ async function generateToken(wait = true) {
   }
   updateInstallInstructions();
 }
+
+function showTokenReady() {
+  $('token-result').textContent = `Token ready (single use, expires ${new Date(generatedTokenExpires).toLocaleString()})`;
+  $('token-result').classList.remove('hidden');
+}
+
 
 async function waitForNewDevice() {
   clearInterval(enrollWaitTimer);
@@ -1922,7 +1931,12 @@ async function waitForNewDevice() {
         enrollWaitTimer = null;
         setText('enroll-wait-text', `Connected: ${fresh.nickname} (${fresh.hostname}, ${fresh.os_type}). You can now troubleshoot it from "What's the issue?".`);
         setText('agent-count', data.agents.length);
-        // The token just used now belongs to that device: the next device gets a fresh one.
+        // The token just used now belongs to that device: the next device gets a fresh one, and the address
+        // goes back to the usual one if this was the server's own install.
+        if (enrollingServer) {
+          enrollingServer = false;
+          $('enroll-server').value = defaultEnrollServer || location.origin;
+        }
         if (!openEnrollment) generateToken(false);
       }
     } catch (_error) {
@@ -1944,6 +1958,8 @@ async function copyInstallCommand() {
     setText('copy-install', 'Press Ctrl+C');
   }
   setTimeout(() => setText('copy-install', 'Copy'), 2000);
+  // Watch for the device this command is for (also after an earlier device connected).
+  if (!enrollWaitTimer) waitForNewDevice();
 }
 
 async function downloadAgent() {
@@ -1978,7 +1994,7 @@ async function loadAddAgent() {
   try {
     const info = await fetch('/api/agents/enrollment').then((response) => response.json());
     openEnrollment = Boolean(info.open);
-    if (!$('enroll-server').value) $('enroll-server').value = info.server_url || location.origin;
+    defaultEnrollServer = info.server_url || location.origin;
     // Public ngrok address: explain that the free URL changes when ngrok restarts.
     $('enroll-ngrok-note').classList.toggle('hidden', !info.ngrok_url);
     if (info.ngrok_url) {
@@ -1986,8 +2002,11 @@ async function loadAddAgent() {
       $('use-ngrok-url').addEventListener('click', () => { $('enroll-server').value = info.ngrok_url; updateInstallInstructions(); });
     }
   } catch (_error) {
-    if (!$('enroll-server').value) $('enroll-server').value = location.origin;
+    defaultEnrollServer = defaultEnrollServer || location.origin;
   }
+  // The server's own install reaches AIops on the host itself; every other device uses the usual address.
+  if (enrollingServer) $('enroll-server').value = SERVER_SELF_URL;
+  else if (!$('enroll-server').value) $('enroll-server').value = defaultEnrollServer;
   $('enroll-token-step').classList.toggle('hidden', openEnrollment);
   setText('enroll-run-number', openEnrollment ? '2' : '3');
   updateInstallInstructions();
@@ -1996,11 +2015,15 @@ async function loadAddAgent() {
   if (!openEnrollment && (!generatedToken || generatedTokenExpires - Date.now() < 3600 * 1000)) await generateToken();
 }
 
+const SERVER_SELF_URL = 'http://127.0.0.1';
+let enrollingServer = false;
+let defaultEnrollServer = '';
+
 // Dashboard callout: set Add Agent up for the server AIops runs on (Linux, reached from the host itself).
 function installAgentOnServer() {
+  enrollingServer = true;
   selectedPlatform = 'linux';
   document.querySelectorAll('.platform-tab').forEach((item) => item.classList.toggle('active', item.dataset.platform === 'linux'));
-  $('enroll-server').value = 'http://127.0.0.1';
   switchTab('add-agent');
 }
 
@@ -2610,6 +2633,10 @@ function wireEvents() {
   document.querySelectorAll('.platform-tab').forEach((button) => button.addEventListener('click', () => {
     selectedPlatform = button.dataset.platform;
     document.querySelectorAll('.platform-tab').forEach((item) => item.classList.toggle('active', item === button));
+    if (enrollingServer && selectedPlatform !== 'linux') {
+      enrollingServer = false;  // a different device after all: back to the usual address
+      $('enroll-server').value = defaultEnrollServer || location.origin;
+    }
     updateInstallInstructions();
   }));
 

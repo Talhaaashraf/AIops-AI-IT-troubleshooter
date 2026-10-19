@@ -10,21 +10,21 @@ stayed on "Waiting for telemetry". AI work now runs on its own pool and waits fo
 import asyncio
 import functools
 import os
-import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 
-def _int_env(name, default):
+def int_env(name, default):
     try:
         return max(1, int(os.getenv(name, str(default))))
     except ValueError:
         return default
 
 
-AI_EXECUTOR = ThreadPoolExecutor(_int_env("AI_WORKER_THREADS", 4), thread_name_prefix="aiops-ai")
+AI_EXECUTOR = ThreadPoolExecutor(int_env("AI_WORKER_THREADS", 4), thread_name_prefix="aiops-ai")
 MONITOR_EXECUTOR = ThreadPoolExecutor(2, thread_name_prefix="aiops-monitor")
 # One gate per event loop: an asyncio.Semaphore belongs to the loop it was first used on (tests run many loops).
-_gates = weakref.WeakKeyDictionary()
+# A plain dict, pruned of closed loops: not every loop type (uvloop's, in the image) is sure to allow weak references.
+_gates = {}
 
 
 async def run_ai(function, *args, **kwargs):
@@ -42,5 +42,7 @@ def ai_gate():
     loop = asyncio.get_running_loop()
     gate = _gates.get(loop)
     if gate is None:
-        gate = _gates[loop] = asyncio.Semaphore(_int_env("OLLAMA_MAX_PARALLEL", 1))
+        for closed in [item for item in _gates if item.is_closed()]:
+            del _gates[closed]
+        gate = _gates[loop] = asyncio.Semaphore(int_env("OLLAMA_MAX_PARALLEL", 1))
     return gate

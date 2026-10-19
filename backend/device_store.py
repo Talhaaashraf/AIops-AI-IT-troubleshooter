@@ -35,7 +35,8 @@ def _connect():
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'offline',
-            token_expires_at TEXT
+            token_expires_at TEXT,
+            onboarding_session_id TEXT
         )
     """)
     connection.execute("""
@@ -91,7 +92,7 @@ def _upgrade(connection):
     connection.commit()
 
 
-MAX_PENDING_TOKENS = 10
+MAX_PENDING_TOKENS = 25
 
 
 def create_pending_token(hours=24):

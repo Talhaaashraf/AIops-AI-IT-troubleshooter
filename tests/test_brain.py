@@ -254,8 +254,10 @@ def test_only_person_triggered_code_can_change_a_device():
                     continue
                 args = call.args
                 wrapper = getattr(call.func, "attr", None) or getattr(call.func, "id", None)
-                if wrapper in ("to_thread", "run_ai", "run_monitor") and args and isinstance(args[0], ast.Name):
+                if wrapper in ("to_thread", "run_ai", "run_monitor", "partial") and args and isinstance(args[0], ast.Name):
                     name, args = args[0].id, args[1:]  # asyncio.to_thread(run_tool, ...), run_ai(...) from backend/workers.py
+                elif wrapper == "run_in_executor" and len(args) > 1 and isinstance(args[1], ast.Name):
+                    name, args = args[1].id, args[2:]  # loop.run_in_executor(pool, run_tool, ...)
                 else:
                     name = call.func.id if isinstance(call.func, ast.Name) else None  # connection.execute(sql) is not ours
                 if name not in risk_argument:

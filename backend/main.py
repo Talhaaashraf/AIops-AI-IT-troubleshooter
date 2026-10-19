@@ -41,7 +41,7 @@ from .event_logs import collect_event_log_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, get_task, list_tasks, pending_change
-from .workers import run_ai, run_monitor
+from .workers import int_env, run_ai, run_monitor
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -173,7 +173,7 @@ async def start_monitor():
     main_loop = asyncio.get_running_loop()
     # AI work and the live monitor have pools of their own (backend/workers.py); this one serves the rest
     # (agent task polls, decision records), which the default min(32, CPUs + 4) threads made scarce.
-    main_loop.set_default_executor(ThreadPoolExecutor(int(os.getenv("DEFAULT_WORKER_THREADS", "16")), thread_name_prefix="aiops"))
+    main_loop.set_default_executor(ThreadPoolExecutor(int_env("DEFAULT_WORKER_THREADS", 16), thread_name_prefix="aiops"))
     status = ai_status()
     logger.info("AI provider: %s / %s - %s", status.get("provider"), status.get("model"), status.get("message"))
     _spawn(run_ai(prepare_ai, "startup"))
@@ -352,8 +352,12 @@ async def monitor(websocket: WebSocket):
         connections.discard(websocket)
 
 
+# Security and event logs of "this server": the host agent's when it is installed, else this process's own.
 @app.get("/api/diagnostics/security")
 async def security():
+    host = await asyncio.to_thread(server_identity.server_report_section, "security")
+    if host:
+        return host
     if latest_security_report is None:
         return await refresh_security()
     return latest_security_report
@@ -361,6 +365,9 @@ async def security():
 
 @app.get("/api/diagnostics/logs")
 async def event_logs_endpoint():
+    host = await asyncio.to_thread(server_identity.server_report_section, "event_logs")
+    if host:
+        return host
     if latest_event_log_report is None:
         return await refresh_event_logs()
     return latest_event_log_report
@@ -370,13 +377,15 @@ async def event_logs_endpoint():
 def diagnose_event_logs_endpoint(think: bool = False):
     if not is_ai_available():
         raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
-    if latest_event_log_report is None:
+    server = server_identity.server_device()
+    logs = server_identity.server_report_section("event_logs") or latest_event_log_report
+    if logs is None:
         raise HTTPException(status_code=404, detail="No event log data collected yet")
     try:
-        result = diagnose_logs(latest_event_log_report, think=think)
+        result = diagnose_logs(logs, think=think)
     except (AIModelUnavailableError, AIUnavailableError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-    _record_ai("log_analysis", LOCAL_DEVICE_ID, think, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")}, used_ai=result.get("source") != "rules")
+    _record_ai("log_analysis", server["device_id"] if server else LOCAL_DEVICE_ID, think, {"summary": result.get("summary"), "root_cause": result.get("root_cause"), "steps": result.get("steps")}, used_ai=result.get("source") != "rules")
     return result
 
 
@@ -862,6 +871,12 @@ async def _run_performance_job(job, target):
 
 
 def _performance_target(device_id):
+    # In Docker "this server" is the host's agent; the AIops container's own numbers would mislead.
+    if server_identity.is_container_target(device_id):
+        server = server_identity.server_device()
+        if not server:
+            raise HTTPException(status_code=400, detail="That is the AIops container, not the server: install the agent on the server (Add Agent) to test it.")
+        device_id = server["device_id"]
     target = resolve_target(device_id)
     if target is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1481,6 +1496,9 @@ def troubleshoot_feedback(session_id: str, payload: dict):
     session = session_store.get_session(session_id, include_steps=False)
     if not session or not session.get("report"):
         raise HTTPException(status_code=404, detail="No diagnosis to rate for this session")
+    if server_identity.is_container_target(session.get("device_id")):
+        # Such a rating once became the AI's only trusted lesson and leaked into unrelated tickets.
+        raise HTTPException(status_code=400, detail="Diagnoses of the AIops container are not used for learning. Install the agent on the server or PC and rate its diagnoses instead.")
     if not learning_store.get_case(session_id):
         learning_store.record_session(session)
     learning_store.set_feedback(session_id, bool(payload.get("helpful")), str(payload.get("note") or ""), str(payload.get("corrected_root_cause") or ""))

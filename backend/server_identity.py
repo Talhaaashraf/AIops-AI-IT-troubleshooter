@@ -7,6 +7,7 @@ read-only mount of the host's /etc/hostname (HOST_HOSTNAME_FILE). The dashboard 
 show that agent as "This server".
 """
 
+import logging
 import os
 import socket
 import time
@@ -15,14 +16,21 @@ from datetime import datetime, timezone
 from .collectors import collect_report
 from .device_store import get_latest_report, list_devices
 
+logger = logging.getLogger(__name__)
 CACHE_SECONDS = 30
 # An agent reports every 10 s by default; older data is shown, but marked stale.
 STALE_SECONDS = 60
 _cache = {"at": 0.0, "device": None}
+_warned = set()
 
 
 def in_docker():
     return bool(os.getenv("SENTINEL_IN_DOCKER"))
+
+
+def is_container_target(device_id):
+    """The AIops container itself (Docker): not a user's computer, so it is never learned from."""
+    return in_docker() and (device_id or "local") in ("local", "local-server")
 
 
 def host_hostname():
@@ -42,15 +50,32 @@ def _short(name):
 
 
 def server_device(refresh=False):
-    """The enrolled agent running on this server's host (online first, then most recently seen), or None."""
+    """The enrolled agent running on this server's host, or None. AIOPS_SERVER_DEVICE_ID pins it; otherwise the
+    hostname decides, and among several devices with that name the online one enrolled first wins (a device
+    enrolled later under the same name cannot take its place)."""
     now = time.monotonic()
     if not refresh and now - _cache["at"] < CACHE_SECONDS:
         return _cache["device"]
+    devices = list_devices()
+    pinned = os.getenv("AIOPS_SERVER_DEVICE_ID", "").strip()
     name = _short(host_hostname())
-    matches = [device for device in list_devices() if name and _short(device.get("hostname")) == name]
-    matches.sort(key=lambda device: (device.get("status") == "online", device.get("last_seen") or ""), reverse=True)
+    if pinned:
+        matches = [device for device in devices if device["device_id"] == pinned]
+    else:
+        matches = [device for device in devices if name and _short(device.get("hostname")) == name]
+    matches.sort(key=lambda device: (device.get("status") != "online", device.get("first_seen") or ""))
+    if len(matches) > 1 and name not in _warned:
+        _warned.add(name)
+        logger.warning("%d devices are named %s; showing %s as this server. Set AIOPS_SERVER_DEVICE_ID to choose.", len(matches), name, matches[0]["device_id"])
     _cache.update(at=now, device=matches[0] if matches else None)
     return _cache["device"]
+
+
+def server_report_section(field):
+    """A section (e.g. "security", "event_logs") of the host agent's latest report, or None without one."""
+    device = server_device()
+    latest = get_latest_report(device["device_id"]) if device else None
+    return (latest or {}).get("diagnostics", {}).get(field)
 
 
 def _age_seconds(timestamp):

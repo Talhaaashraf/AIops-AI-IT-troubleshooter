@@ -34,6 +34,7 @@ from ..learning import model_builder
 from ..learning import store as learning_store
 from ..llm import LLMUnavailableError, get_provider
 from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
+from ..server_identity import is_container_target
 from ..workers import ai_gate, run_ai
 from . import events, findings, session_store
 from .executor import execute, resolve_target
@@ -429,9 +430,12 @@ def add_learned_fixes(report, learned, os_type):
 
 
 async def learn_from(session_id):
-    """Record the session as a learned case and rebuild the aiops-brain model when due."""
+    """Record the session as a learned case and rebuild the aiops-brain model when due. A diagnosis of the AIops
+    container (Docker) teaches nothing: it describes the container, not a user's computer."""
     try:
         session = session_store.get_session(session_id, include_steps=False)
+        if session and is_container_target(session.get("device_id")):
+            return
         if session and session.get("report"):
             await asyncio.to_thread(learning_store.record_session, session)
             info = await run_ai(model_builder.maybe_rebuild)

@@ -28,10 +28,11 @@ PROTECTED_PROCESSES = {
     "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe",
     "dwm.exe", "msmpeng.exe", "memory compression", "fontdrvhost.exe", "lsaiso.exe",
     "launchd", "kernel_task", "windowserver", "loginwindow", "systemd", "init", "kthreadd", "sshd", "dbus-daemon", "xorg", "gnome-shell",
-    # The WSL/Docker virtual machine, the AI engine and AIops' own agent: closing them stops AIops (and every
-    # container) instead of freeing memory for the user.
+    # The WSL/Docker virtual machine, the AI engine, AIops' own server processes (seen from the host it runs on)
+    # and its agent: closing them stops AIops (and every container) instead of freeing memory for the user.
     "vmmem", "vmmemwsl", "vmcompute.exe", "com.docker.backend.exe", "docker desktop.exe", "dockerd", "containerd",
-    "ollama", "ollama.exe", "ollama app.exe", "ollama_llama_server", "llama-server", "devicehealthagent", "devicehealthagent.exe",
+    "containerd-shim-runc-v2", "docker-proxy", "ollama", "ollama.exe", "ollama app.exe", "ollama_llama_server", "llama-server",
+    "uvicorn", "nginx", "ngrok", "devicehealthagent", "devicehealthagent.exe",
 }
 
 STARTUP_BACKUP_KEY = r"Software\Sentinel\DisabledStartup"

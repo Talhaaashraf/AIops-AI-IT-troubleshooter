@@ -126,6 +126,9 @@ def main(argv=None):
     parser.add_argument("--json-out", default="", help="also write the rows as JSON to this file")
     args = parser.parse_args(argv)
 
+    unknown = [item for item in args.case.split(",") if item and item not in CASES_BY_ID]
+    if unknown:
+        parser.error(f"unknown case(s) {', '.join(unknown)}; choose from {', '.join(CASES_BY_ID)}")
     cases = [CASES_BY_ID[item] for item in args.case.split(",") if item] if args.case else CASES
     model = args.model or _saved_model(os.getenv("SENTINEL_DB_PATH"))
     # Before any backend module reads its configuration: a throw-away database and decisions folder.
@@ -137,24 +140,26 @@ def main(argv=None):
     if args.model:
         os.environ["LEARNING_USE_MODEL"] = "false"
 
-    from ..llm import get_provider
+    try:
+        from ..llm import get_provider
 
-    status = get_provider().status()
-    print(f"AIops evaluation: {len(cases)} case(s), mode {args.mode}, model {status.get('model')} ({status.get('message')})", flush=True)
-    rows = []
-    for case in cases:
-        print(f"- {case['id']}: {case['issue']}", flush=True)
-        try:
-            row = asyncio.run(run_case(case, args.mode))
-        except Exception as error:  # one broken case must not lose the others' results
-            row = {"case": case["id"], "error": f"{type(error).__name__}: {error}"}
-        print(f"  {row.get('error') or row.get('root_cause')} [{row.get('confidence_value')}; {row.get('seconds')} s]", flush=True)
-        rows.append(row)
-    print()
-    print(format_rows(rows))
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps({"mode": args.mode, "model": status.get("model"), "rows": rows}, indent=2), encoding="utf-8")
-    shutil.rmtree(workdir, ignore_errors=True)
+        status = get_provider().status()
+        print(f"AIops evaluation: {len(cases)} case(s), mode {args.mode}, model {status.get('model')} ({status.get('message')})", flush=True)
+        rows = []
+        for case in cases:
+            print(f"- {case['id']}: {case['issue']}", flush=True)
+            try:
+                row = asyncio.run(run_case(case, args.mode))
+            except Exception as error:  # one broken case must not lose the others' results
+                row = {"case": case["id"], "error": f"{type(error).__name__}: {error}"}
+            print(f"  {row.get('error') or row.get('root_cause')} [{row.get('confidence_value')}; {row.get('seconds')} s]", flush=True)
+            rows.append(row)
+        print()
+        print(format_rows(rows))
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps({"mode": args.mode, "model": status.get("model"), "rows": rows}, indent=2), encoding="utf-8")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     return 0
 
 

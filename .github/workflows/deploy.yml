@@ -18,8 +18,9 @@ jobs:
         run: |
           cp /home/aiops/app-config/.env .env
           # The host's name lets AIops show the agent installed on this server as "This server" instead of
-          # its own container (backend/server_identity.py). A value already in the .env wins.
-          if ! grep -q '^AIOPS_SERVER_HOSTNAME=' .env; then
+          # its own container (backend/server_identity.py). A value already in the .env wins; an empty one is replaced.
+          if ! grep -q '^AIOPS_SERVER_HOSTNAME=.' .env; then
+            sed -i '/^AIOPS_SERVER_HOSTNAME=/d' .env
             [ -z "$(tail -c1 .env)" ] || echo >> .env
             echo "AIOPS_SERVER_HOSTNAME=$(hostname)" >> .env
           fi

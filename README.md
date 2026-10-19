@@ -65,7 +65,7 @@ More detail: [docs/04-docker.md](docs/04-docker.md). Moving to another PC: [docs
 ## Add devices (agents)
 
 1. Open **Add Agent**. Check the server address: the ngrok https URL, or `http://<LAN IP>`.
-2. Enter `ADMIN_API_KEY` and click **Generate token**. The token is single-use and valid for 24 hours.
+2. A one-time token is created when the page opens (the dashboard login is enough; no key to paste). It is single-use and valid for 24 hours; **New token** makes another.
 3. Run the command on the device:
 
    ```powershell
@@ -164,11 +164,14 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `DIAGNOSIS_THINKING` | `true` | Deep thinking for diagnosis reports |
 | `AGENT_MAX_STEPS` | `3` | Extra AI investigation rounds in deep mode |
 | `AGENT_AI_TIMEOUT_SECONDS` | `300` | Longest one AI call may take. Past it the rule-based diagnosis is shown. Calls with thinking use `AGENT_AI_TIMEOUT_SECONDS_DEEP` (900). |
-| `ADMIN_API_KEY` | none | Needed to generate enrollment tokens |
+| `ADMIN_API_KEY` | none | `X-Admin-Key` for `DELETE /api/agents/{id}`; also the login password when `DASHBOARD_PASSWORD` is empty |
 | `DASHBOARD_PASSWORD` | none | Turns on the dashboard login |
 | `ONBOARDING_CHECK` | `true` | AI check-up the first time a device reports |
 | `OPEN_ENROLLMENT` | `false` | Enroll agents without a token (trusted LAN only) |
 | `SENTINEL_PUBLIC_URL` | browser URL | Server address written into install commands |
+| `AIOPS_SERVER_HOSTNAME` | written by the deploy workflow | The host's name: its AIops agent is shown as "This server" instead of the container |
+| `AIOPS_SERVER_DEVICE_ID` | empty | Pins "This server" to one agent when several have the host's name |
+| `AI_WORKER_THREADS`, `DEFAULT_WORKER_THREADS` | `4`, `16` | Thread pools for AI work and for everything else, kept apart so a slow model never stalls the dashboard |
 | `NGROK_AUTHTOKEN` | empty | Turns on the public https URL |
 | `PUBLIC_URL_FROM_NGROK` | `true` | Use the live ngrok URL in install commands |
 | `LEARNED_MODEL_NAME` | `aiops-brain` | Name of AIops' own model in Ollama |
@@ -224,8 +227,9 @@ All routes need the dashboard login, except the agent and enrollment routes.
   - `GET /api/learning/stats|cases|lessons`, `POST /api/learning/rebuild`
 - **Fleet:**
   - `GET /api/agents`, `/api/agents/{id}/diagnostics|security|logs|alerts|tasks|health-report|onboarding`
-  - `DELETE /api/agents/{id}`
+  - `DELETE /api/agents/{id}` (also needs the `X-Admin-Key` header)
   - `POST /api/agents/generate-token`
+  - `GET /api/server/identity`
 - **Agent channel** (agent token):
   - `POST /api/agents/register`, `POST /api/agents/report`
   - `GET /api/agents/tasks/next`, `POST /api/agents/tasks/{task_id}/result`
