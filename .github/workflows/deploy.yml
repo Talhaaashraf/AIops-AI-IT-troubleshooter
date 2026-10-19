@@ -1,0 +1,23 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep the gitignored folders the containers write to (decisions/, models/aiops-brain/):
+          # the default clean deletes them on every push, and fails on files the containers own as root.
+          clean: false
+
+      - name: Copy env file
+        run: cp /home/aiops/app-config/.env .env
+
+      - name: Build and deploy
+        run: |
+          docker compose up -d --build
+          docker image prune -f
