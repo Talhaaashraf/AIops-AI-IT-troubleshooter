@@ -95,19 +95,46 @@ function renderHealth(health) {
 
 function setConnection(state, detail) {
   $('connection-state').className = `connection-state ${state}`;
-  const label = state === 'connected' ? 'Monitor connected' : state === 'disconnected' ? 'Disconnected' : 'Connecting';
-  setText('connection-label', label);
+  const labels = { connected: 'Monitor connected', disconnected: 'Disconnected', error: 'No live data' };
+  setText('connection-label', labels[state] || 'Connecting');
   setText('connection-detail', detail);
 }
 
+// Which machine the dashboard shows: the AIops agent on the server's host, or (in Docker, until that agent is
+// installed) only the AIops container.
+function renderServerSource(source) {
+  const kind = source?.kind;
+  const stale = source?.stale ? ' (its last report is old)' : '';
+  setText('server-source', kind === 'host-agent' ? `Via the AIops agent on ${source.label}${stale}` : kind === 'container' ? 'AIops container, not the server itself' : 'This computer');
+  $('server-container-note').classList.toggle('hidden', kind !== 'container');
+  return kind === 'host-agent' ? `Live from the server's agent${stale}` : kind === 'container' ? 'Live / AIops container view' : 'Live stream / 5 second interval';
+}
+
+let monitorWatchdog = null;
+
 function connectMonitor() {
   clearTimeout(reconnectTimer);
+  clearTimeout(monitorWatchdog);
   setConnection('', 'Opening monitor stream');
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   socket = new WebSocket(`${protocol}://${location.host}/ws/monitor`);
-  socket.onopen = () => setConnection('connected', 'Live stream / 5 second interval');
-  socket.onmessage = (event) => renderReport(JSON.parse(event.data));
+  // An open socket is not live data yet: say "connected" only when a report arrives.
+  socket.onopen = () => {
+    setConnection('', 'Connected, waiting for the first data...');
+    monitorWatchdog = setTimeout(() => setConnection('error', 'Connected, but no data yet: the server may be busy. Still waiting...'), 20000);
+  };
+  socket.onmessage = (event) => {
+    clearTimeout(monitorWatchdog);
+    const data = JSON.parse(event.data);
+    if (data.error) {
+      setConnection('error', data.error);
+      return;
+    }
+    renderReport(data);
+    setConnection('connected', renderServerSource(data.source));
+  };
   socket.onclose = () => {
+    clearTimeout(monitorWatchdog);
     setConnection('disconnected', 'Retrying in 3 seconds');
     reconnectTimer = setTimeout(connectMonitor, 3000);
   };
@@ -880,10 +907,12 @@ function renderEventLogs(report) {
   `).join('');
 }
 
-// Online agents first, then offline ones, then this server (in Docker it is only the container).
+// The server's own agent first, then online agents, then offline ones, then this AIops process.
 function targetRank(target) {
-  return target.device_id === 'local' ? 2 : target.status === 'online' ? 0 : 1;
+  return target.server ? -1 : target.device_id === 'local' ? 2 : target.status === 'online' ? 0 : 1;
 }
+
+const NO_DEVICES_OPTION = '<option value="">No devices yet: add one under Add Agent</option>';
 
 // Fill a device <select> (best target first).
 async function fillDeviceSelect(select, onChange) {
@@ -891,7 +920,9 @@ async function fillDeviceSelect(select, onChange) {
   try {
     const data = await fetch('/api/troubleshoot/targets').then((response) => response.json());
     const targets = (data.targets || []).sort((a, b) => targetRank(a) - targetRank(b));
-    select.innerHTML = targets.map((target) => `<option value="${escapeHtml(target.device_id)}">${escapeHtml(target.label)} / ${escapeHtml(target.os_type)}${target.status !== 'online' ? ' - offline' : ''}</option>`).join('');
+    select.innerHTML = targets.length
+      ? targets.map((target) => `<option value="${escapeHtml(target.device_id)}">${escapeHtml(target.label)} / ${escapeHtml(target.os_type)}${target.status !== 'online' ? ' - offline' : ''}</option>`).join('')
+      : NO_DEVICES_OPTION;
     if (current && [...select.options].some((option) => option.value === current)) select.value = current;
   } catch (_error) {
     if (!select.options.length) select.innerHTML = '<option value="local">This server</option>';
@@ -1023,10 +1054,7 @@ async function loadModels() {
 }
 
 async function modelRequest(path, name) {
-  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: name }) });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-  return data;
+  return readJson(await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: name }) }));
 }
 
 function showModelError(error) {
@@ -1297,6 +1325,20 @@ function friendlyError(error) {
     return 'Lost the connection to the AIops server (it may have restarted or the network changed). Try again.';
   }
   return error.message;
+}
+
+// A JSON reply, or a readable error. During a deploy nginx answers 502 with an HTML page, which made
+// response.json() fail with "Unexpected token '<'".
+async function readJson(response) {
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (_error) {
+    throw new Error(response.ok ? 'The server sent an unexpected reply.' : `The server answered ${response.status}; it may be restarting. Try again in a minute.`);
+  }
+  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+  return data;
 }
 
 // ----------------------------------------------------------------------------
@@ -1813,6 +1855,7 @@ const INSTALL_COMMANDS = {
 
 let enrollWaitTimer = null;
 let openEnrollment = false;
+let generatedTokenExpires = 0;
 
 function installUrl(server, script, token) {
   const query = new URLSearchParams();
@@ -1842,28 +1885,27 @@ function updateInstallInstructions() {
   setText('install-hint', commands.hint);
   setText('uninstall-command', commands.uninstall(server));
   const ready = openEnrollment || generatedToken;
-  setText('install-command', ready ? commands.install(server, generatedToken) : 'Generate a token first.');
+  setText('install-command', ready ? commands.install(server, generatedToken) : 'Waiting for a token (see step 2).');
   $('copy-install').disabled = !ready;
 }
 
-async function generateToken() {
+// The dashboard login is enough to make a token: it is created when Add Agent opens, no key to paste.
+// wait: also watch for the device that uses it (false right after a device connected, to keep that message).
+async function generateToken(wait = true) {
   const result = $('token-result');
+  result.textContent = 'Creating a one-time token...';
+  result.classList.remove('hidden');
   try {
-    const response = await fetch('/api/agents/generate-token', {
-      method: 'POST',
-      headers: { 'X-Admin-Key': $('admin-key-input').value },
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || 'Admin authentication failed');
+    const data = await readJson(await fetch('/api/agents/generate-token', { method: 'POST' }));
     generatedToken = data.token;
+    generatedTokenExpires = Date.parse(data.expires_at) || 0;
     result.textContent = `Token ready (single use, expires ${new Date(data.expires_at).toLocaleString()})`;
-    result.classList.remove('hidden');
-    updateInstallInstructions();
-    waitForNewDevice();
+    if (wait) waitForNewDevice();
   } catch (error) {
-    result.textContent = error.message;
-    result.classList.remove('hidden');
+    generatedToken = '';
+    result.textContent = friendlyError(error);
   }
+  updateInstallInstructions();
 }
 
 async function waitForNewDevice() {
@@ -1877,8 +1919,11 @@ async function waitForNewDevice() {
       const fresh = (data.agents || []).find((agent) => !known.has(agent.device_id));
       if (fresh) {
         clearInterval(enrollWaitTimer);
+        enrollWaitTimer = null;
         setText('enroll-wait-text', `Connected: ${fresh.nickname} (${fresh.hostname}, ${fresh.os_type}). You can now troubleshoot it from "What's the issue?".`);
         setText('agent-count', data.agents.length);
+        // The token just used now belongs to that device: the next device gets a fresh one.
+        if (!openEnrollment) generateToken(false);
       }
     } catch (_error) {
       // keep waiting
@@ -1947,6 +1992,16 @@ async function loadAddAgent() {
   setText('enroll-run-number', openEnrollment ? '2' : '3');
   updateInstallInstructions();
   if (openEnrollment && !enrollWaitTimer) waitForNewDevice();
+  // A token is made as the page opens; one with under an hour left is replaced.
+  if (!openEnrollment && (!generatedToken || generatedTokenExpires - Date.now() < 3600 * 1000)) await generateToken();
+}
+
+// Dashboard callout: set Add Agent up for the server AIops runs on (Linux, reached from the host itself).
+function installAgentOnServer() {
+  selectedPlatform = 'linux';
+  document.querySelectorAll('.platform-tab').forEach((item) => item.classList.toggle('active', item.dataset.platform === 'linux'));
+  $('enroll-server').value = 'http://127.0.0.1';
+  switchTab('add-agent');
 }
 
 // ============================================================================
@@ -2007,8 +2062,8 @@ async function loadTroubleshootTargets(selectedId) {
     select.innerHTML = (data.targets || []).sort((a, b) => targetRank(a) - targetRank(b)).map((target) => {
       const offline = target.status !== 'online' ? ' - offline' : '';
       return `<option value="${escapeHtml(target.device_id)}">${escapeHtml(target.label)} / ${escapeHtml(target.os_type)}${offline}</option>`;
-    }).join('');
-    select.value = [...select.options].some((option) => option.value === current) ? current : (select.options[0]?.value || 'local');
+    }).join('') || NO_DEVICES_OPTION;
+    select.value = [...select.options].some((option) => option.value === current) ? current : (select.options[0]?.value ?? '');
   } catch (_error) {
     select.innerHTML = '<option value="local">This server</option>';
   }
@@ -2520,7 +2575,8 @@ function wireEvents() {
   $('chat-form').addEventListener('submit', sendChat);
 
   $('add-agent-button').addEventListener('click', () => switchTab('add-agent'));
-  $('generate-token-button').addEventListener('click', generateToken);
+  $('generate-token-button').addEventListener('click', () => generateToken());
+  $('install-server-agent').addEventListener('click', installAgentOnServer);
   $('download-agent-button').addEventListener('click', downloadAgent);
   $('copy-install').addEventListener('click', copyInstallCommand);
   $('enroll-server').addEventListener('input', updateInstallInstructions);

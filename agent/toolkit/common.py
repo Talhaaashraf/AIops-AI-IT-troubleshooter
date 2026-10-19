@@ -17,6 +17,16 @@ def os_name():
     return platform.system()
 
 
+def cpu_frequency():
+    """psutil.cpu_freq(), or None where it raises (some VMs and ARM boards expose no CPU frequency)."""
+    import psutil
+
+    try:
+        return psutil.cpu_freq()
+    except (NotImplementedError, OSError):
+        return None
+
+
 def is_admin():
     try:
         if os_name() == "Windows":

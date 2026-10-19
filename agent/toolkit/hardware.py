@@ -10,7 +10,7 @@ from collections import Counter
 
 import psutil
 
-from .common import human_size, os_name, powershell, run_command
+from .common import cpu_frequency, human_size, os_name, powershell, run_command
 from .registry import tool
 
 # Device Manager problem codes worth reporting (22 = disabled by the user, 45 = not plugged in: not faults).
@@ -69,7 +69,7 @@ def _windows():
         raw = json.loads(output) if output else {}
     except json.JSONDecodeError:
         raw = {}
-    frequency = psutil.cpu_freq()
+    frequency = cpu_frequency()
     bios = r"HARDWARE\DESCRIPTION\System\BIOS"
     cpu = {
         "Name": _registry_text(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString"),
@@ -159,7 +159,7 @@ def _macos():
 
 def _finalize(data):
     """Add the cross-platform bits (frequency, RAM total) and derive the one-line summary."""
-    frequency = psutil.cpu_freq()
+    frequency = cpu_frequency()
     cpu = data.setdefault("cpu", {})
     if frequency:
         cpu.setdefault("max_mhz", round(frequency.max) if frequency.max else None)

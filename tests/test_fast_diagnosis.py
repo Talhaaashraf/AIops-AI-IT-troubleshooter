@@ -201,6 +201,9 @@ def test_fixes_the_device_would_refuse_are_never_proposed():
         {"tool_id": "restart_service", "args": {"name": "uvicorn"}},
         {"tool_id": "restart_service", "args": {"name": "Spooler"}},
         {"tool_id": "kill_process", "args": {"pid": 600, "expected_name": "lsass.exe"}},
+        # The WSL/Docker VM and the AI engine: closing them stops AIops itself.
+        {"tool_id": "kill_process", "args": {"pid": 700, "expected_name": "vmmemWSL"}},
+        {"tool_id": "kill_process", "args": {"pid": 800, "expected_name": "ollama.exe"}},
     ]
     kept = planner.validate_fixes(raw, "Windows")
     assert [(fix["tool_id"], fix["args"]) for fix in kept] == [("restart_service", {"name": "Spooler"})]

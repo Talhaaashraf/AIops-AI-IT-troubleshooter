@@ -28,6 +28,10 @@ PROTECTED_PROCESSES = {
     "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe",
     "dwm.exe", "msmpeng.exe", "memory compression", "fontdrvhost.exe", "lsaiso.exe",
     "launchd", "kernel_task", "windowserver", "loginwindow", "systemd", "init", "kthreadd", "sshd", "dbus-daemon", "xorg", "gnome-shell",
+    # The WSL/Docker virtual machine, the AI engine and AIops' own agent: closing them stops AIops (and every
+    # container) instead of freeing memory for the user.
+    "vmmem", "vmmemwsl", "vmcompute.exe", "com.docker.backend.exe", "docker desktop.exe", "dockerd", "containerd",
+    "ollama", "ollama.exe", "ollama app.exe", "ollama_llama_server", "llama-server", "devicehealthagent", "devicehealthagent.exe",
 }
 
 STARTUP_BACKUP_KEY = r"Software\Sentinel\DisabledStartup"
@@ -150,7 +154,7 @@ def reset_network_stack():
 # Services and processes
 # ---------------------------------------------------------------------------
 
-@tool("restart_service", "Restart one allow-listed OS service (e.g. Spooler, wuauserv, BITS, Audiosrv, WlanSvc, W32Time, NetworkManager, cups, coreaudiod).", risk="medium",
+@tool("restart_service", "Restart one allow-listed OS service; the allowed names depend on the OS (Windows: Spooler, wuauserv, BITS, Audiosrv, WlanSvc, W32Time; Linux: NetworkManager, cups; macOS: coreaudiod).", risk="medium",
       params={"name": {"type": "string", "maxLength": 100, "description": "Service name"}}, required=("name",), timeout=120)
 def restart_service(name):
     system = os_name()

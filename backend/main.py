@@ -7,7 +7,9 @@ import logging
 import os
 import re
 import secrets
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import decision_log, health_report, public_url, software_store, task_queue, task_signals
+from . import decision_log, health_report, public_url, server_identity, software_store, task_queue, task_signals
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
@@ -39,6 +41,7 @@ from .event_logs import collect_event_log_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, get_task, list_tasks, pending_change
+from .workers import run_ai, run_monitor
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -73,6 +76,9 @@ latest_event_log_report = None
 
 SECURITY_REFRESH_SECONDS = 300
 EVENT_LOG_REFRESH_SECONDS = 600
+# The monitor refreshes every 5 s; a newer snapshot is served from here instead of collecting again.
+SNAPSHOT_MAX_AGE_SECONDS = 15
+latest_snapshot = {"at": 0.0, "report": None, "error_logged_at": 0.0}
 
 
 # ============================================================================
@@ -80,9 +86,11 @@ EVENT_LOG_REFRESH_SECONDS = 600
 # ============================================================================
 
 def require_admin(request):
-    """Stricter, separate gate for provisioning actions (generate/revoke agent tokens)."""
+    """Stricter, separate gate for revoking an agent (API only). Compared as bytes: a non-ASCII key must give
+    401, not a TypeError (500)."""
     configured = os.getenv("ADMIN_API_KEY", "").strip()
-    if not configured or not secrets.compare_digest(request.headers.get("X-Admin-Key", ""), configured):
+    provided = request.headers.get("X-Admin-Key", "")
+    if not configured or not secrets.compare_digest(provided.encode("utf-8", "surrogateescape"), configured.encode("utf-8", "surrogateescape")):
         raise HTTPException(status_code=401, detail="Admin authentication required")
 
 
@@ -163,9 +171,12 @@ async def start_monitor():
     session_store.mark_interrupted_sessions()
     global main_loop
     main_loop = asyncio.get_running_loop()
+    # AI work and the live monitor have pools of their own (backend/workers.py); this one serves the rest
+    # (agent task polls, decision records), which the default min(32, CPUs + 4) threads made scarce.
+    main_loop.set_default_executor(ThreadPoolExecutor(int(os.getenv("DEFAULT_WORKER_THREADS", "16")), thread_name_prefix="aiops"))
     status = ai_status()
     logger.info("AI provider: %s / %s - %s", status.get("provider"), status.get("model"), status.get("message"))
-    _spawn(asyncio.to_thread(prepare_ai, "startup"))
+    _spawn(run_ai(prepare_ai, "startup"))
     asyncio.create_task(monitor_loop())
     asyncio.create_task(offline_loop())
     asyncio.create_task(security_loop())
@@ -209,24 +220,48 @@ def warm_up_llm():
         logger.warning("Could not preload the AI model", exc_info=True)
 
 
+def _server_snapshot():
+    """This server's live report: the host agent's latest report, or this process's own view (the container,
+    in Docker). Alerts are raised here only for the own view: an agent's reports raise their own."""
+    report = server_identity.server_snapshot()
+    return report if report["source"]["kind"] == "host-agent" else snapshot_with_alerts(report)
+
+
+async def take_snapshot():
+    report = await run_monitor(_server_snapshot)
+    latest_snapshot.update(at=time.monotonic(), report=report)
+    return report
+
+
+async def current_snapshot():
+    """The monitor's latest report when it is fresh, so a page load never waits for a new one."""
+    if latest_snapshot["report"] and time.monotonic() - latest_snapshot["at"] < SNAPSHOT_MAX_AGE_SECONDS:
+        return latest_snapshot["report"]
+    return await take_snapshot()
+
+
 async def monitor_loop():
     while True:
         try:
-            report = snapshot_with_alerts(await asyncio.to_thread(collect_report))
-            for connection in list(connections):
-                try:
-                    await connection.send_json(report)
-                except Exception:
-                    connections.discard(connection)
-        except Exception:
-            pass
+            payload = await take_snapshot()
+        except Exception as error:
+            # Shown in the dashboard footer instead of leaving it on "Waiting"; logged at most once a minute.
+            if time.monotonic() - latest_snapshot["error_logged_at"] > 60:
+                latest_snapshot["error_logged_at"] = time.monotonic()
+                logger.exception("Live monitor could not read this server's status")
+            payload = {"error": f"Could not read this server's status: {error}"}
+        for connection in list(connections):
+            try:
+                await connection.send_json(payload)
+            except Exception:
+                connections.discard(connection)
         await asyncio.sleep(5)
 
 
 async def offline_loop():
     while True:
         try:
-            mark_offline_devices()
+            await asyncio.to_thread(mark_offline_devices)
         except Exception:
             logger.exception("Failed to update remote device statuses")
         await asyncio.sleep(10)
@@ -278,13 +313,19 @@ def frontend():
 
 
 @app.get("/api/diagnostics")
-def diagnostics():
-    return snapshot_with_alerts(collect_report())
+async def diagnostics():
+    return await current_snapshot()
 
 
 @app.get("/api/diagnostics/health")
-def health():
-    return health_from_report(collect_report())
+async def health():
+    return health_from_report(await current_snapshot())
+
+
+@app.get("/api/server/identity")
+def server_identity_endpoint():
+    """Which machine "This server" is: the host's agent once it is installed, otherwise the AIops container."""
+    return server_identity.identity()
 
 
 @app.websocket("/ws/monitor")
@@ -295,10 +336,19 @@ async def monitor(websocket: WebSocket):
         return
     connections.add(websocket)
     try:
-        await websocket.send_json(snapshot_with_alerts(await asyncio.to_thread(collect_report)))
+        try:
+            first = await current_snapshot()
+        except Exception as error:
+            logger.warning("Live monitor: first snapshot failed", exc_info=True)
+            first = {"error": f"Could not read this server's status: {error}"}
+        await websocket.send_json(first)
         while True:
             await websocket.receive_text()
-    except (WebSocketDisconnect, Exception):
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Live monitor connection closed by an error", exc_info=True)
+    finally:
         connections.discard(websocket)
 
 
@@ -332,7 +382,9 @@ def diagnose_event_logs_endpoint(think: bool = False):
 
 @app.get("/api/alerts")
 def alerts(limit: int = 100):
-    return {"alerts": get_alerts(max(1, min(limit, 500)), "local-server")}
+    """This server's alerts: the host agent's once it is installed, else the ones raised for this process."""
+    server = server_identity.server_device()
+    return {"alerts": get_alerts(max(1, min(limit, 500)), server["device_id"] if server else "local-server")}
 
 
 # ============================================================================
@@ -341,9 +393,14 @@ def alerts(limit: int = 100):
 
 @app.post("/api/agents/generate-token")
 def generate_agent_token(request: Request):
-    require_admin(request)
+    """One-time enrollment token for the Add Agent page. The dashboard login is the gate (no separate admin key
+    to paste). Without a login configured, anyone who reaches the server could mint tokens, so it is refused."""
+    if not auth_enabled():
+        raise HTTPException(status_code=403, detail="Set DASHBOARD_PASSWORD in .env to enroll agents with one-time tokens (or set OPEN_ENROLLMENT=true)")
+    if not has_valid_session(request.cookies):
+        raise HTTPException(status_code=401, detail="Login required")
     token, expires_at = create_pending_token()
-    return {"token": token, "expires_at": expires_at, "message": "Use this token once when registering a new agent."}
+    return JSONResponse({"token": token, "expires_at": expires_at, "message": "Use this token once when registering a new agent."}, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/agents/register")
@@ -1038,8 +1095,12 @@ def agent_chat(payload: dict):
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
 
-    # Chat about a chosen device; in Docker "this server" is only the container.
+    # Chat about a chosen device. "This server" is the host's agent once it is installed; until then, in
+    # Docker, it is only the container.
     device_id = str(payload.get("device_id") or "").strip()
+    server = server_identity.server_device() if device_id in ("", LOCAL_DEVICE_ID, "local-server") else None
+    if server:
+        device_id = server["device_id"]
     report = None
     if device_id and device_id not in (LOCAL_DEVICE_ID, "local-server"):
         latest = get_latest_report(device_id)
@@ -1112,10 +1173,10 @@ async def ai_select_model(payload: dict):
         raise HTTPException(status_code=409, detail=f"{name} is not downloaded yet")
     previous = provider.base_model
     llm_catalog.save_selected_model(name)
-    await asyncio.to_thread(provider.use_model, name)
+    await run_ai(provider.use_model, name)
     logger.info("AI model switched to %s", name)
     await asyncio.to_thread(decision_log.record, "model_switch", name, {"action": f"Switched the AI base model from {previous} to {name}", "previous": previous, "model": name, "approved_by": "operator"})
-    _spawn(asyncio.to_thread(prepare_ai, "model switch"))
+    _spawn(run_ai(prepare_ai, "model switch"))
     return await asyncio.to_thread(ai_models)
 
 
@@ -1143,11 +1204,30 @@ def troubleshoot_playbooks():
 
 
 @app.get("/api/troubleshoot/targets")
-def troubleshoot_targets():
-    local = resolve_target(LOCAL_DEVICE_ID)
-    targets = [{"device_id": local.device_id, "label": local.label, "os_type": local.os_type, "status": "online"}]
-    targets += [{"device_id": device["device_id"], "label": f"{device['nickname']} ({device['hostname']})", "os_type": device["os_type"], "status": device["status"]} for device in list_devices()]
+def troubleshoot_targets(include_container: bool = False):
+    """Devices to diagnose. The agent on this server's host is labelled "This server". In Docker the AIops
+    container itself is left out unless asked for: diagnosing it instead of a real machine gave reports about
+    the wrong computer (and taught the AI wrong lessons)."""
+    server = server_identity.server_device()
+    targets = []
+    for device in list_devices():
+        is_server = bool(server) and device["device_id"] == server["device_id"]
+        label = f"This server ({device['hostname']})" if is_server else f"{device['nickname']} ({device['hostname']})"
+        targets.append({"device_id": device["device_id"], "label": label, "os_type": device["os_type"], "status": device["status"], "server": is_server})
+    if include_container or not server_identity.in_docker():
+        local = resolve_target(LOCAL_DEVICE_ID)
+        targets.insert(0, {"device_id": local.device_id, "label": local.label, "os_type": local.os_type, "status": "online", "server": False})
     return {"targets": targets}
+
+
+def _default_target_id():
+    """The device a request without one is about: the server's own agent, else (outside Docker) this server."""
+    server = server_identity.server_device()
+    if server:
+        return server["device_id"]
+    if server_identity.in_docker():
+        raise HTTPException(status_code=400, detail="Pick a device. To diagnose this server, install the agent on it (Add Agent).")
+    return LOCAL_DEVICE_ID
 
 
 @app.get("/api/troubleshoot/tools")
@@ -1164,7 +1244,7 @@ async def start_troubleshoot(payload: dict):
     playbook_id = str(payload.get("playbook_id") or "").strip() or None
     if not issue:
         raise HTTPException(status_code=400, detail="Describe the issue first")
-    target = resolve_target(str(payload.get("device_id") or LOCAL_DEVICE_ID))
+    target = resolve_target(str(payload.get("device_id") or "").strip() or _default_target_id())
     if target is None:
         raise HTTPException(status_code=404, detail="Device not found")
     # Without a working AI the session still runs and returns the instant rule-based diagnosis.
@@ -1427,7 +1507,7 @@ def learning_lessons():
 
 @app.post("/api/learning/rebuild")
 async def learning_rebuild():
-    info = await asyncio.to_thread(model_builder.build, "manual")
+    info = await run_ai(model_builder.build, "manual")
     getattr(get_llm_provider(), "refresh", lambda: None)()
     return info
 

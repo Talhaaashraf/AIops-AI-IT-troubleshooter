@@ -28,15 +28,20 @@ def session_token():
     return hmac.new(password.encode("utf-8"), b"sentinel-dashboard-session", hashlib.sha256).hexdigest()
 
 
+def _same(provided, expected):
+    """Constant-time comparison of bytes: compare_digest raises TypeError (a 500) on non-ASCII strings."""
+    return hmac.compare_digest(provided.encode("utf-8", "surrogateescape"), expected.encode("utf-8", "surrogateescape"))
+
+
 def check_password(candidate):
     password = _dashboard_password()
-    return bool(password) and hmac.compare_digest(candidate.strip(), password)
+    return bool(password) and _same(candidate.strip(), password)
 
 
 def has_valid_session(cookies):
     if not auth_enabled():
         return True
-    return hmac.compare_digest(cookies.get(SESSION_COOKIE_NAME, ""), session_token())
+    return _same(cookies.get(SESSION_COOKIE_NAME, ""), session_token())
 
 
 # Agent-facing endpoints authenticate with their own agent/enrollment token, not the

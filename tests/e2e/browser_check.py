@@ -84,7 +84,17 @@ with sync_playwright() as playwright:
     page.wait_for_function("document.getElementById('ai-chip-text').textContent.startsWith('Model:')", timeout=15000)
     chip = page.inner_text("#ai-chip")
     check("model chip visible with Change label", "Model:" in chip and "Change" in chip, chip.replace("\n", " "))
+    # The footer says "connected" only once data arrived, and the dashboard names the machine it shows.
+    page.wait_for_function("document.getElementById('hostname').textContent !== '--'", timeout=30000)
+    footer, source = page.inner_text("#connection-state"), page.inner_text("#server-source")
+    check("dashboard shows live data and says whose", "connected" in footer.lower() and "Waiting" not in source, f"{footer.splitlines()[0]} / {source}")
     page.screenshot(path=str(OUT / "01-dashboard.png"))
+
+    # Add Agent: the install command is ready without pasting any key (a one-time token is made on open).
+    page.click("button.nav-item[data-tab=add-agent]")
+    page.wait_for_function("document.getElementById('install-command').textContent.includes('token=')", timeout=15000)
+    check("Add Agent makes a token without any key", page.locator("#admin-key-input").count() == 0, page.inner_text("#token-result"))
+    page.click("button.nav-item[data-tab=dashboard]")
 
     page.click("#ai-chip")
     page.wait_for_selector("#model-panel:not(.hidden) .model-option", timeout=10000)

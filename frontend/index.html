@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=20261016c">
+  <link rel="stylesheet" href="/static/style.css?v=20261019a">
   <script>
     try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
   </script>
@@ -91,7 +91,7 @@
       <div id="ai-banner" class="ai-banner hidden">
         <span>AI OFFLINE</span>
         <strong>The AI technician is unavailable</strong>
-        <p id="ai-banner-detail">Install Ollama and pull a model (<code>ollama pull qwen3:8b</code>) to enable AI troubleshooting and chat. Local monitoring remains active.</p>
+        <p id="ai-banner-detail">Install Ollama and pull a model (<code>ollama pull qwen3:4b</code>) to enable AI troubleshooting and chat. Local monitoring remains active.</p>
       </div>
 
       <!-- ============================== DASHBOARD ============================== -->
@@ -144,8 +144,13 @@
 
         <section class="panel">
           <div class="section-heading">
-            <div><p class="kicker">Endpoint identity</p><h2>This server</h2></div>
+            <div><p class="kicker">Endpoint identity</p><h2>This server</h2><small id="server-source" class="soft-label">Waiting for the first report</small></div>
             <span id="process-count" class="soft-label">-- processes</span>
+          </div>
+          <div id="server-container-note" class="enroll-warning hidden">
+            You are seeing the AIops container, not the server it runs on: this hostname, these processes and disks belong to the container.
+            Install the AIops agent on the server to see the real machine (and to diagnose it).
+            <button id="install-server-agent" class="ghost-button" type="button">Install the agent on this server</button>
           </div>
           <div class="overview-grid">
             <div><small>HOSTNAME</small><strong id="hostname">--</strong></div>
@@ -514,10 +519,9 @@
           <section id="enroll-token-step" class="panel enroll-step">
             <span class="step-number">2</span>
             <h2>Enrollment token</h2>
-            <p class="modal-copy">A one-time token, valid for 24 hours, that lets one device register.</p>
+            <p class="modal-copy">Created automatically when this page opens: single use, valid for 24 hours. A new one is made after each device connects.</p>
             <div class="enroll-row">
-              <input id="admin-key-input" class="field-input" type="password" placeholder="Admin API key (ADMIN_API_KEY in .env)" autocomplete="off">
-              <button id="generate-token-button" class="primary-button">Generate token</button>
+              <button id="generate-token-button" class="ghost-button" type="button">New token</button>
             </div>
             <div id="token-result" class="token-result hidden"></div>
           </section>
@@ -531,7 +535,7 @@
               <button data-platform="mac" class="platform-tab">macOS</button>
             </div>
             <p id="install-hint" class="modal-copy"></p>
-            <div class="code-block"><code id="install-command">Generate a token first.</code><button id="copy-install" class="ghost-button" disabled>Copy</button></div>
+            <div class="code-block"><code id="install-command">Creating a token...</code><button id="copy-install" class="ghost-button" disabled>Copy</button></div>
             <p id="enroll-wait" class="enroll-wait hidden"><span class="health-pulse"></span><span id="enroll-wait-text">Waiting for the device to connect...</span></p>
             <details class="enroll-more">
               <summary>Uninstall command / manual install</summary>
@@ -549,6 +553,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261016c"></script>
+  <script src="/static/app.js?v=20261019a"></script>
 </body>
 </html>

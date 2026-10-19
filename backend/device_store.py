@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -53,6 +54,21 @@ def _connect():
         )
     """)
 
+    # The upgrades below write to the database, so they run once per database file and process, not on
+    # every connection (every agent report and dashboard poll opens one).
+    if str(DB_PATH) not in _upgraded:
+        with _upgrade_lock:
+            if str(DB_PATH) not in _upgraded:
+                _upgrade(connection)
+                _upgraded.add(str(DB_PATH))
+    return connection
+
+
+_upgraded = set()
+_upgrade_lock = threading.Lock()
+
+
+def _upgrade(connection):
     columns = {row[1] for row in connection.execute("PRAGMA table_info(devices)").fetchall()}
     for column, definition in (("agent_token_hash", "TEXT"), ("token_expires_at", "TEXT"), ("onboarding_session_id", "TEXT")):
         if column not in columns:
@@ -73,16 +89,26 @@ def _connect():
         )
 
     connection.commit()
-    return connection
+
+
+MAX_PENDING_TOKENS = 10
 
 
 def create_pending_token(hours=24):
+    """A one-time enrollment token. The Add Agent page makes one each time it opens, so expired tokens are
+    purged and only the newest MAX_PENDING_TOKENS unclaimed ones stay valid."""
     token = secrets.token_urlsafe(32)
-    expires_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + hours * 3600, timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    expires_at = datetime.fromtimestamp(now.timestamp() + hours * 3600, timezone.utc).isoformat()
     with _connect() as connection:
+        connection.execute("DELETE FROM pending_agent_tokens WHERE expires_at <= ?", (now.isoformat(),))
         connection.execute(
             "INSERT INTO pending_agent_tokens (token_hash, expires_at) VALUES (?, ?)",
             (hash_token(token), expires_at),
+        )
+        connection.execute(
+            "DELETE FROM pending_agent_tokens WHERE token_hash NOT IN (SELECT token_hash FROM pending_agent_tokens ORDER BY expires_at DESC LIMIT ?)",
+            (MAX_PENDING_TOKENS,),
         )
         connection.commit()
     return token, expires_at

@@ -67,13 +67,13 @@ def test_saved_model_choice_wins_over_env(monkeypatch):
 
 def test_switching_model_unloads_the_previous_one(monkeypatch):
     provider, sent = _provider(monkeypatch, ["completion", "tools"])
-    provider.last_load_error = "qwen3:8b could not be loaded: out of memory"
+    provider.last_load_error = "qwen3:4b could not be loaded: out of memory"
     monkeypatch.setattr(provider, "status", lambda: {"model": provider.base_model})
 
-    provider.use_model("qwen3:4b")
+    provider.use_model("qwen3:8b")
 
-    assert sent == [{"model": "qwen3:8b", "keep_alive": 0}]
-    assert provider.base_model == "qwen3:4b" and provider.last_load_error is None
+    assert sent == [{"model": "qwen3:4b", "keep_alive": 0}]
+    assert provider.base_model == "qwen3:8b" and provider.last_load_error is None
 
 
 def test_model_mojibake_is_repaired():

@@ -43,7 +43,7 @@ def selected_model():
         saved = get_setting(SETTING_KEY)
     except sqlite3.Error:
         saved = None
-    return (saved or os.getenv("OLLAMA_MODEL", "qwen3:8b")).strip()
+    return (saved or os.getenv("OLLAMA_MODEL", "qwen3:4b")).strip()
 
 
 def save_selected_model(name):

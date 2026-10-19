@@ -106,8 +106,22 @@ def human_size(value):
     return f"{size:.2f} TB"
 
 
+def cpu_frequency():
+    """psutil raises on some VMs and ARM boards that expose no CPU frequency."""
+    try:
+        return psutil.cpu_freq()
+    except (NotImplementedError, OSError):
+        return None
+
+
+def uptime_info():
+    boot = psutil.boot_time()
+    seconds = max(0, time.time() - boot)
+    return {"boot_time": datetime.datetime.fromtimestamp(boot).isoformat(sep=" ", timespec="seconds"), "uptime": str(datetime.timedelta(seconds=int(seconds))), "uptime_seconds": round(seconds, 2)}
+
+
 def collect_report(config):
-    frequency = psutil.cpu_freq()
+    frequency = cpu_frequency()
     per_core = psutil.cpu_percent(interval=0.15, percpu=True)
     memory, swap = psutil.virtual_memory(), psutil.swap_memory()
     disks = []
@@ -137,7 +151,7 @@ def collect_report(config):
             processes.append({"pid": info["pid"], "name": info.get("name") or "Unknown", "cpu_percent": round(info.get("cpu_percent") or 0, 2), "memory_percent": round(info.get("memory_percent") or 0, 2)})
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    return {"system": {"os_name": platform.system(), "os_version": platform.version(), "os_release": platform.release(), "architecture": platform.machine(), "processor": processor_name(), "hostname": socket.gethostname()}, "cpu": {"physical_cores": psutil.cpu_count(logical=False), "logical_cores": psutil.cpu_count(logical=True), "max_frequency_mhz": frequency.max if frequency else None, "current_frequency_mhz": frequency.current if frequency else None, "per_core_usage_percent": per_core, "total_usage_percent": psutil.cpu_percent(interval=None)}, "memory": {"ram": {"total": human_size(memory.total), "available": human_size(memory.available), "used": human_size(memory.used), "usage_percent": memory.percent}, "swap": {"total": human_size(swap.total), "used": human_size(swap.used), "usage_percent": swap.percent}}, "disk": disks, "network": {"bytes_sent": human_size(psutil.net_io_counters().bytes_sent), "bytes_received": human_size(psutil.net_io_counters().bytes_recv), "interfaces": interfaces}, "battery": battery, "processes_count": len(processes), "top_processes": {"top_by_cpu": sorted(processes, key=lambda item: item["cpu_percent"], reverse=True)[:5], "top_by_memory": sorted(processes, key=lambda item: item["memory_percent"], reverse=True)[:5]}, "security": get_security(), "performance": get_performance(config), "event_logs": get_event_logs()}
+    return {"system": {"os_name": platform.system(), "os_version": platform.version(), "os_release": platform.release(), "architecture": platform.machine(), "processor": processor_name(), "hostname": socket.gethostname(), **uptime_info()}, "cpu": {"physical_cores": psutil.cpu_count(logical=False), "logical_cores": psutil.cpu_count(logical=True), "max_frequency_mhz": frequency.max if frequency else None, "current_frequency_mhz": frequency.current if frequency else None, "per_core_usage_percent": per_core, "total_usage_percent": psutil.cpu_percent(interval=None)}, "memory": {"ram": {"total": human_size(memory.total), "available": human_size(memory.available), "used": human_size(memory.used), "usage_percent": memory.percent}, "swap": {"total": human_size(swap.total), "used": human_size(swap.used), "usage_percent": swap.percent}}, "disk": disks, "network": {"bytes_sent": human_size(psutil.net_io_counters().bytes_sent), "bytes_received": human_size(psutil.net_io_counters().bytes_recv), "interfaces": interfaces}, "battery": battery, "processes_count": len(processes), "top_processes": {"top_by_cpu": sorted(processes, key=lambda item: item["cpu_percent"], reverse=True)[:5], "top_by_memory": sorted(processes, key=lambda item: item["memory_percent"], reverse=True)[:5]}, "security": get_security(), "performance": get_performance(config), "event_logs": get_event_logs()}
 
 
 IDLE_PROCESS_NAMES = {"system idle process", "idle"}

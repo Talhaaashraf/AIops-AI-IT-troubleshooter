@@ -1,10 +1,16 @@
 """Windows-safe psutil collectors returning JSON-serializable dictionaries."""
 
 import datetime
+import logging
 import platform
 import socket
 
 import psutil
+
+from agent.toolkit.common import cpu_frequency
+
+logger = logging.getLogger(__name__)
+_failed_sections = set()
 
 
 def human_size(value):
@@ -35,7 +41,7 @@ def get_system_info():
 
 
 def get_cpu_info():
-    frequency = psutil.cpu_freq()
+    frequency = cpu_frequency()
     per_core = psutil.cpu_percent(interval=0.15, percpu=True)
     return {
         "physical_cores": psutil.cpu_count(logical=False),
@@ -135,17 +141,30 @@ def get_top_processes():
     }
 
 
+def _safe(section, collector, fallback=None):
+    """One unreadable section must not blank the whole dashboard. Logged once per section, not every 5 s."""
+    try:
+        value = collector()
+    except Exception:
+        if section not in _failed_sections:
+            _failed_sections.add(section)
+            logger.warning("Could not read the %s section of this server's report", section, exc_info=True)
+        return fallback
+    _failed_sections.discard(section)
+    return value
+
+
 def collect_report():
     try:
         process_count = len(list(psutil.process_iter()))
     except (OSError, psutil.Error):
         process_count = None
     return {
-        "system": get_system_info(),
-        "cpu": get_cpu_info(),
-        "memory": get_memory_info(),
-        "disk": get_disk_info(),
-        "network": get_network_info(),
-        "battery": get_battery_info(),
+        "system": _safe("system", get_system_info, {}),
+        "cpu": _safe("cpu", get_cpu_info, {}),
+        "memory": _safe("memory", get_memory_info, {}),
+        "disk": _safe("disk", get_disk_info, []),
+        "network": _safe("network", get_network_info, {}),
+        "battery": _safe("battery", get_battery_info),
         "processes_count": process_count,
     }

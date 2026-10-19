@@ -10,6 +10,11 @@ commit, restart services or change settings: you inspect, run checks, and report
 
 Project root: the repository containing `task.md`. Read `task.md` first to know which phase you are verifying.
 
+**No local Docker.** AIops is deployed to an Ubuntu server by GitHub Actions; nothing may run on the dev laptop
+(no `docker compose up`, no local server). On the laptop do §1 and §2 only. Instead of §3 and §4, list the exact
+commands the user should run on the server (from the runner's checkout folder) and from the laptop against the
+server's URL (`AIOPS_URL=... python -u tests/e2e/api_check.py ...`), and say which checks they verify.
+
 ## 1. Review the changes
 
 Run `git status` and `git diff` (and read new untracked files). Check:

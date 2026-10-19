@@ -76,3 +76,33 @@ Deployed: phases 0-6 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTH
   - the download button works, and last-seen uses the server clock;
   - dead code removed, versions pinned
 - [x] The Adobe Acrobat uninstall at 09:29 UTC (a dashboard click) lost its record in a server restart: backfilled from the task log and labelled "recorded afterwards"
+
+## Phase 7: Accurate, faster AI, the real server, Add Agent without an admin key
+
+Why: the real decision records showed wrong causes with high confidence (a 90% full disk with 23 GB free blamed for hangs while
+RAM was 93%), 11-13 minutes per answer, rule fallbacks, a dashboard stuck on "Waiting", and container diagnoses mistaken for
+the PC. The app now deploys to an Ubuntu server (GitHub Actions, self-hosted runner, 16 GB, no GPU): **nothing runs on the dev
+laptop**. Code and unit tests are checked there; live checks run on the server, done by the user (`[~]` until then).
+
+Push 1: dashboard, real server, Add Agent, evaluation
+- [~] AI work on its own thread pool, queued diagnoses wait without holding threads (`backend/workers.py`); live monitor on its own pool with a cached snapshot; errors logged and shown instead of swallowed
+- [~] "This server" is the AIops agent on the host (`backend/server_identity.py`, `AIOPS_SERVER_HOSTNAME` written by the deploy workflow); in Docker the container is no longer offered as a device to diagnose
+- [~] Dashboard footer says "connected" only once data arrives, names the source, and offers "Install the agent on this server"
+- [~] Add Agent: no admin key; a one-time token is created when the page opens (dashboard login is the gate); expired and surplus tokens purged; odd input gives 401, not 500
+- [~] WSL/Docker VM, Ollama and the agent itself can never be closed by a fix (toolkit 1.5.0); agent reports uptime; `cpu_freq` failures no longer break reports
+- [~] Default model qwen3:4b (fits a 16 GB CPU server)
+- [~] Evaluation: `python -m backend.agent_brain.evaluate` scores 8 real-ticket scenarios (baseline before Push 2)
+- [~] Learned-case cleanup CLI: `python -m backend.learning.admin` (remove case 32 and test tickets)
+
+Push 2: diagnosis accuracy and speed
+- [ ] Fast mode: one non-thinking call with a JSON schema; Qwen3 sampling; partial-JSON recovery; deep mode with a thinking budget
+- [ ] Findings split into "can explain the complaint" and "separate problems"; generalised grounding and confidence calibration
+- [ ] Disk severity by free space; memory culprits grouped by app with tips; richer fast-mode evidence (device profile, startup names)
+- [ ] Solutions ranked by the cause, OS-aware tips, word-boundary playbook matching, retry on an Ollama disconnect
+
+Push 3: learning hygiene
+- [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples
+
+Push 4: Groq as an optional, clearly labelled cloud choice; docs
+- [ ] Groq selectable in the model switcher after a cloud warning; local stays the default
+- [ ] README, docs/04, docs/05, .env.example

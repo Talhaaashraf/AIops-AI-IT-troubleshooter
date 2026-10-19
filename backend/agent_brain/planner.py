@@ -34,6 +34,7 @@ from ..learning import model_builder
 from ..learning import store as learning_store
 from ..llm import LLMUnavailableError, get_provider
 from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
+from ..workers import ai_gate, run_ai
 from . import events, findings, session_store
 from .executor import execute, resolve_target
 from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, match_playbook, playbook_tips
@@ -433,7 +434,7 @@ async def learn_from(session_id):
         session = session_store.get_session(session_id, include_steps=False)
         if session and session.get("report"):
             await asyncio.to_thread(learning_store.record_session, session)
-            info = await asyncio.to_thread(model_builder.maybe_rebuild)
+            info = await run_ai(model_builder.maybe_rebuild)
             if info:
                 logger.info("Rebuilt %s v%s from %s trusted cases", info["model"], info["version"], info["trusted_cases"])
                 refresh = getattr(get_provider(), "refresh", None)
@@ -465,7 +466,9 @@ def ai_call_timeout(deep=False):
 
 async def _chat(messages, **kwargs):
     kwargs.setdefault("timeout", ai_call_timeout(deep=bool(kwargs.get("think"))))
-    return await asyncio.to_thread(get_provider().chat, messages, **kwargs)
+    # Queued diagnoses wait for the gate as coroutines; only the running call holds a thread (backend/workers.py).
+    async with ai_gate():
+        return await run_ai(get_provider().chat, messages, **kwargs)
 
 
 def _thinking_publisher(session_id):
@@ -585,8 +588,9 @@ async def _diagnose(session, target, mode, preset_evidence=None):
             note = f"AI unavailable, instant rule-based diagnosis: {status.get('message', 'AI provider unavailable')}"
             _think(session_id, note)
             mode = "instant"
-    # Load the model while the checks run, so the first AI call does not pay the load time.
-    warm_up = asyncio.create_task(asyncio.to_thread(_warm_up)) if mode != "instant" else None
+    # Load the model while the checks run, so the first AI call does not pay the load time. While another
+    # diagnosis is generating, the model is already loaded.
+    warm_up = asyncio.create_task(run_ai(_warm_up)) if mode != "instant" and not ai_gate().locked() else None
 
     playbook = get_playbook(session.get("playbook_id")) or match_playbook(issue)
     if preset_evidence:

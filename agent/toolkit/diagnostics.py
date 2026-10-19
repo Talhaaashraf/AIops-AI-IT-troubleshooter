@@ -21,7 +21,7 @@ from pathlib import Path
 
 import psutil
 
-from .common import human_size, is_admin, os_name, powershell, run_command, directory_size
+from .common import cpu_frequency, human_size, is_admin, os_name, powershell, run_command, directory_size
 from .event_logs import collect_event_log_report
 from .performance_checks import collect_performance_report
 from .registry import tool
@@ -78,7 +78,7 @@ def trash_directories():
 def system_overview():
     cpu = psutil.cpu_percent(interval=0.5)
     memory, swap = psutil.virtual_memory(), psutil.swap_memory()
-    frequency = psutil.cpu_freq()
+    frequency = cpu_frequency()
     uptime_seconds = int(time.time() - psutil.boot_time())
     disks = []
     for partition in psutil.disk_partitions(all=False):
