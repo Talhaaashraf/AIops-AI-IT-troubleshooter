@@ -1364,7 +1364,8 @@ TASK_RESULT_MAX_BYTES = 200_000
 
 @app.get("/api/agents/tasks/next")
 async def agent_next_task(request: Request, wait: int = 25):
-    device = authenticated_device(request)
+    # Every agent polls here: its SQLite lookup must not hold up the event loop (a locked database waits up to 5 s).
+    device = await asyncio.to_thread(authenticated_device, request)
     deadline = asyncio.get_running_loop().time() + max(1, min(wait, 30))
     while True:
         # Listen before claiming so a task enqueued in between still wakes this poll at once.

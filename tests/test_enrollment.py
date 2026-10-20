@@ -76,3 +76,19 @@ def test_expired_and_surplus_enrollment_tokens_are_purged():
     assert not device_store.is_valid_install_token(expired)
     assert not device_store.is_valid_install_token(tokens[0])
     assert all(device_store.is_valid_install_token(token) for token in tokens[1:])
+
+
+def test_the_newest_token_survives_even_when_many_share_one_clock_tick(monkeypatch):
+    from datetime import datetime, timezone
+
+    frozen = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(device_store, "datetime", Clock)
+    tokens = [device_store.create_pending_token()[0] for _ in range(device_store.MAX_PENDING_TOKENS + 5)]
+    monkeypatch.setattr(device_store, "datetime", datetime)
+    assert device_store.is_valid_install_token(tokens[-1]) and not device_store.is_valid_install_token(tokens[0])

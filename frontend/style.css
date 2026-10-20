@@ -382,6 +382,7 @@ select.field-input { cursor: pointer; }
 .risk-low { color: var(--ok); background: var(--ok-soft); }
 .risk-medium { color: var(--warn); background: var(--warn-soft); }
 .risk-high { color: var(--bad); background: var(--bad-soft); }
+.separate-badge { padding: 2px 9px; border-radius: 999px; color: var(--warn); background: var(--warn-soft); font-size: .68rem; font-weight: 700; white-space: nowrap; }
 .learned-badge { padding: 2px 9px; border-radius: 999px; color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent); font-size: .68rem; font-weight: 700; white-space: nowrap; }
 .ts-verify { padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .ts-verify.ok { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); background: var(--ok-soft); }
@@ -644,5 +645,5 @@ select.field-input { cursor: pointer; }
 .mouse-pad .kb-hint { position: absolute; right: 14px; bottom: 6px; left: 14px; pointer-events: none; }
 #kb-result, #mouse-result { margin-top: 8px; font-size: .8rem; line-height: 1.5; }
 
-@media (max-width: 900px) { .input-test-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .input-test-grid { grid-template-columns: minmax(0, 1fr); } }  /* minmax(0): the keyboard scrolls in its box instead of widening the page */
 @media (max-width: 680px) { .perf-grid { grid-template-columns: 1fr; } .perf-ai .button-row { width: 100%; } }

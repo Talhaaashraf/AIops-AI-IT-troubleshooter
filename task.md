@@ -58,7 +58,7 @@ Deployed: phases 0-6 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTH
 - [x] OS updates (`os_updates`, `install_os_updates`: high risk, only ids a fresh search still offers, never restarts) + app updates with Update / Update all
 - [x] Deep AI analysis with 3-4 suggestions: a `performance` playbook diagnosis that starts from the test results (no re-run), recorded as `performance_analysis`
 - [x] Review fixes: one change at a time per device (409), approvals recorded before long installs, installs always name their updates (empty list refused), boot judged on desktop-ready time, input devices grouped (touchpad collections, Intel hotkey filter), no install buttons for the server container, hidden tools never promoted to one-click fixes, stronger AST guard
-- [ ] Live run of the new checks on the laptop: needs the agent reinstalled with toolkit 1.4.0 (the agent installed today is 1.3.0)
+- [~] Live run of the new checks on the laptop: every read-only check of toolkit 1.5.0 ran for real on the dev laptop on 2026-10-20 (24 of 25 OK; `find_leftovers` correctly refused a program that was never uninstalled). The *installed* agent there is still 1.3.0 until it is reinstalled
 
 ## Phase 6: Rebuild, reinstall, review
 
@@ -101,6 +101,21 @@ Push 2: diagnosis accuracy and speed
 - [~] Solutions: the cause first, at most one for a separate problem, tips for the device's OS; whole-word playbook matching; one retry when Ollama drops the connection; the decision record says why the AI fell back
 - [~] Decision records written in the same millisecond no longer overwrite each other (an approval could vanish)
 - Offline evaluation, rules only (instant): cause 8/8, not wrongly blamed 8/8, confidence 8/8, OS-appropriate steps 8/8, first solution on the cause 8/8 (was 7/8 on four checks). The model's numbers come from the server run.
+
+Verification on the dev laptop, 2026-10-20 (no Docker, no server, nothing listening on a port)
+- Unit tests: 164 passed.
+- In-process end-to-end (`verify_app.py` in the session scratchpad): the real app with a throw-away database; a simulated agent enrolled
+  with a one-time token, sent a real report of the laptop and served the server's tasks. Read-only tools ran for real; every
+  device-changing task (fix, update, uninstall, quarantine, restore, OS update) was approved first and only simulated, never run.
+  The AI was a scripted stand-in, so this checks plumbing, grounding and records, not the model's wording. Result: 102/102.
+- Dashboard UI in headless Chromium against the same in-process app (`verify_ui.py`): login, dashboard, Add Agent, Agents,
+  instant and AI diagnoses, Performance full test, Software scan, Ask Technician, every other tab, phone width, no JS errors: 25/25.
+- Bugs found and fixed by these runs: an agent's poll looked its token up on the event loop (a locked database could stall the
+  server for 5 s); the enrollment-token cap could delete the newest token when several were made in one clock tick; the first
+  CPU reading was always 0%; the keyboard tester widened the Performance tab on phones; the UI still said fast mode "thinks
+  deeply"; solution cards for a separate problem now say so.
+- Still to check on the server (the user): the real qwen3:4b answers and timings (`evaluate --mode fast`), Ollama accepting the
+  JSON schema with thinking, nginx/ngrok, the host agent install, and the cleanup of case 32.
 
 Push 3: learning hygiene
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples

@@ -108,7 +108,8 @@ def create_pending_token(hours=24):
             (hash_token(token), expires_at),
         )
         connection.execute(
-            "DELETE FROM pending_agent_tokens WHERE token_hash NOT IN (SELECT token_hash FROM pending_agent_tokens ORDER BY expires_at DESC LIMIT ?)",
+            # Newest by insertion order: several tokens made within one clock tick share the same expiry.
+            "DELETE FROM pending_agent_tokens WHERE rowid NOT IN (SELECT rowid FROM pending_agent_tokens ORDER BY rowid DESC LIMIT ?)",
             (MAX_PENDING_TOKENS,),
         )
         connection.commit()

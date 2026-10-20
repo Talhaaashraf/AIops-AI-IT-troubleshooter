@@ -2291,7 +2291,7 @@ function renderSolution(solution, index, report, session) {
     <div class="solution-head">
       <span class="solution-rank">${index + 1}</span>
       <strong>${escapeHtml(solution.title)}</strong>
-      <span class="button-row"><span class="rule-badge">${escapeHtml(SOLUTION_SOURCES[solution.source] || solution.source || 'AI')}</span><span class="risk risk-${escapeHtml(solution.risk)}">${escapeHtml(solution.risk)} risk</span>${fix ? '<span class="learned-badge">AIops can run this</span>' : ''}</span>
+      <span class="button-row">${solution.scope === 'separate' ? '<span class="separate-badge" title="This fixes another problem the checks found, not the one you reported">Separate problem</span>' : ''}<span class="rule-badge">${escapeHtml(SOLUTION_SOURCES[solution.source] || solution.source || 'AI')}</span><span class="risk risk-${escapeHtml(solution.risk)}">${escapeHtml(solution.risk)} risk</span>${fix ? '<span class="learned-badge">AIops can run this</span>' : ''}</span>
     </div>
     ${solution.why ? `<p>${escapeHtml(solution.why)}</p>` : ''}
     ${steps}
