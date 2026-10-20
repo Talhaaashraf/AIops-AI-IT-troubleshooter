@@ -5,6 +5,7 @@ import logging
 import re
 
 from .llm import LLMModelError, LLMUnavailableError, get_provider
+from .llm.base import loads_lenient
 from .llm.brain import BRAIN_PRINCIPLES
 
 DIAGNOSIS_SYSTEM_PROMPT = (
@@ -20,7 +21,9 @@ LOG_SYSTEM_PROMPT = (
     "first, then give the technical detail, then concrete remediation steps. If the logs show "
     "no meaningful problem, say so plainly. " + BRAIN_PRINCIPLES + " Return valid JSON only."
 )
-CHAT_SYSTEM_PROMPT = DIAGNOSIS_SYSTEM_PROMPT + " Return valid JSON with plain_explanation, technical_root_cause, and recommendations fields."
+CHAT_SYSTEM_PROMPT = DIAGNOSIS_SYSTEM_PROMPT + (
+    " Answer about the device in current_diagnostics: quote the numbers you used (e.g. memory 93%, Chrome 1.1 GB), and say so"
+    " when the data does not show the problem. Return valid JSON with plain_explanation, technical_root_cause, and recommendations fields.")
 
 logger = logging.getLogger(__name__)
 
@@ -138,46 +141,7 @@ def compact_report(report, alert_history=None):
     return {key: value for key, value in digest.items() if value not in (None, "", [], {})}
 
 
-def _loads_lenient(raw):
-    """json.loads, or the longest complete prefix of a reply cut off by the token limit
-    (closing whatever brackets were still open), so a long answer is not thrown away."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        return json.loads(text)
-    except ValueError:
-        pass
-    start = text.find("{")
-    if start < 0:
-        raise ValueError("no JSON object in the reply")
-    text = text[start:]
-    stack, in_string, escaped, cuts = [], False, False, []
-    for index, char in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char in "{[":
-            stack.append("}" if char == "{" else "]")
-        elif char in "}]":
-            if stack:
-                stack.pop()
-            cuts.append((index + 1, "".join(reversed(stack))))
-        elif char == ",":
-            cuts.append((index, "".join(reversed(stack))))
-    for cut, closers in reversed(cuts):
-        try:
-            return json.loads(text[:cut] + closers)
-        except ValueError:
-            continue
-    raise ValueError("no parsable JSON in the reply")
+_loads_lenient = loads_lenient  # moved to backend/llm/base.py; the planner uses it too
 
 
 def _as_text(item):

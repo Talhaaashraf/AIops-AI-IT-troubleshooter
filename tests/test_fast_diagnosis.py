@@ -63,10 +63,11 @@ def test_fast_mode_runs_the_baseline_in_parallel_and_calls_the_llm_once(monkeypa
 
     session = session_store.get_session(session_id)
     assert session["status"] == "diagnosed"
-    # One report call, no investigation round, output capped.
-    # Diagnoses think deeply by default, so the report gets the larger cap (thinking tokens count toward it).
-    expected_cap = planner.REPORT_THINKING_MAX_TOKENS if planner.diagnosis_thinking() else planner.REPORT_MAX_TOKENS
-    assert provider.calls == [{"tools": False, "json_mode": True, "max_tokens": expected_cap}]
+    # One direct report call (fast mode never thinks), no investigation round, output capped, and the answer
+    # must follow the report schema, naming one of the findings (or none) as the cause.
+    assert [(call["tools"], call["max_tokens"]) for call in provider.calls] == [(False, planner.REPORT_MAX_TOKENS)]
+    schema = provider.calls[0]["json_mode"]
+    assert schema["required"][0] == "cause" and schema["properties"]["cause"]["enum"] == ["F1", "none"]
     # disk_full playbook: system_overview, then cleanup_candidates: 2 phases of 0.2 s, not one per tool.
     assert [entry[0] for entry in log] == ["system_overview", "cleanup_candidates"]
     assert elapsed < 1.5
@@ -272,6 +273,11 @@ def test_network_complaint_is_not_blamed_on_an_unrelated_finding():
     grounded = planner.ground_root_cause(dict(report), get_playbook("no_internet"), found, evidence)
     assert grounded["root_cause"].startswith("The network checks passed (Internet connectivity works normally; Wi-Fi connected to Office")
     assert "Separate problems found: Disk C:\\ is 86.5% full." in grounded["root_cause"] and grounded["confidence"] == "low"
-    # A real network finding, or a different complaint, keeps the model's diagnosis.
-    assert planner.ground_root_cause(dict(report), get_playbook("no_internet"), found + [{"key": "net_dns", "title": "DNS is failing"}], evidence) == report
-    assert planner.ground_root_cause(dict(report), get_playbook("slow_pc"), found, evidence) == report
+    # With a real network finding, the network finding is the cause, not the disk the model blamed.
+    dns = {"key": "net_dns", "severity": "high", "title": "DNS is failing", "detail": "Websites cannot be found by name."}
+    regrounded = planner.ground_root_cause(dict(report), get_playbook("no_internet"), found + [dns], evidence)
+    assert regrounded["root_cause"].startswith("DNS is failing.") and regrounded["ai_root_cause"] == report["root_cause"]
+    assert regrounded["cause_finding"] == "net_dns" and "Separate problem: Disk C:" in regrounded["root_cause"]
+    # A slow PC is not explained by a moderately full disk either: the checks did not show the problem.
+    slow = planner.ground_root_cause(dict(report), get_playbook("slow_pc"), found, evidence)
+    assert slow["complaint_reproduced"] is False and slow["confidence"] == "low" and "Separate problems found: Disk C:" in slow["root_cause"]

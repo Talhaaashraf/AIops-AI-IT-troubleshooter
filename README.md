@@ -102,13 +102,14 @@ Optional per-device limits in the agent's `agent_config.json`:
   | `qwen2.5:3b` | 1.9 GB | 3 GB | Qwen Research, no commercial use | about 1-1.5 min |
 
 - **`aiops-brain`.** At startup AIops builds its own model on top of the selected one. It adds the troubleshooting principles (best effort, evidence first, suggest only, 3-4 solutions, say when unsure) and the lessons from resolved tickets. This is training by instructions and examples, not by retraining the model's weights. The Learning tab exports the dataset if you want real fine-tuning. See [docs/05-self-improving-model.md](docs/05-self-improving-model.md).
-- **Deep thinking.** The model reasons before writing each diagnosis (`DIAGNOSIS_THINKING=true`), and the reasoning streams live in the session view. Chat, summaries and log analysis answer directly unless you tick **Think deeper**.
+- **Deep thinking** in deep mode: the model reasons before writing the diagnosis (`DIAGNOSIS_THINKING=true`, within `OLLAMA_MAX_THINKING_CHARS`), and the reasoning streams live in the session view. Fast mode answers directly. Chat, summaries and log analysis answer directly unless you tick **Think deeper**.
+- **Checked answers.** The findings are split into those that can explain the complaint and separate problems. The AI names the one it blames (its answer must follow a JSON schema), and the server checks it: a finding that cannot cause the complaint is never reported as the cause, and "high" confidence needs a severe finding that can. Measure it with `python -m backend.agent_brain.evaluate` (inside the container).
 - **Speed modes** on the What's the issue? tab:
 
   | Mode | What runs | Typical time on a laptop CPU |
   | --- | --- | --- |
   | **Instant** | Parallel checks and rules, no AI. Also used automatically when the AI is offline or too slow. | 5-15 s |
-  | **Fast** (default) | Checks, rules and one AI report with deep thinking. | 2-6 min |
+  | **Fast** (default) | Checks, rules and one direct AI report. | about 1-3 min (expected; measure with the evaluation) |
   | **Deep** | The AI also runs extra read-only checks before reporting. | 5-15 min |
 
   AI calls run one at a time, so a diagnosis waits while another one is running.
@@ -161,7 +162,9 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `OLLAMA_THINK` | `false` | Thinking for calls that do not choose for themselves |
 | `GROQ_API_KEY`, `GROQ_MODEL` | none | Optional cloud provider |
 | `DIAGNOSIS_MODE` | `fast` | Default speed: `instant`, `fast` or `deep` |
-| `DIAGNOSIS_THINKING` | `true` | Deep thinking for diagnosis reports |
+| `DIAGNOSIS_THINKING` | `true` | Deep thinking for diagnosis reports in deep mode (fast mode answers directly) |
+| `OLLAMA_MAX_THINKING_CHARS` | `6000` | Thinking stops here and the answer is written from the reasoning so far |
+| `OLLAMA_SAMPLING` | `qwen` | Qwen3's recommended sampling; `legacy` (temperature 0.2) to compare in the evaluation |
 | `AGENT_MAX_STEPS` | `3` | Extra AI investigation rounds in deep mode |
 | `AGENT_AI_TIMEOUT_SECONDS` | `300` | Longest one AI call may take. Past it the rule-based diagnosis is shown. Calls with thinking use `AGENT_AI_TIMEOUT_SECONDS_DEEP` (900). |
 | `ADMIN_API_KEY` | none | `X-Admin-Key` for `DELETE /api/agents/{id}`; also the login password when `DASHBOARD_PASSWORD` is empty |

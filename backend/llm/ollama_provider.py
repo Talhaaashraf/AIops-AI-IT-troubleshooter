@@ -3,17 +3,26 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
 
 import httpx
 
-from .base import LLMModelError, LLMUnavailableError, clean_content
+from .base import LLMDisconnectedError, LLMModelError, LLMTimeoutError, LLMUnavailableError, clean_content
 from .catalog import selected_model
 
 logger = logging.getLogger(__name__)
 STATUS_CACHE_SECONDS = 15
+# Qwen3's recommended sampling. Near-greedy decoding (temperature 0.2) makes thinking models repeat
+# themselves and reason far longer, which on a CPU costs minutes and runs out of the token budget.
+SAMPLING = {
+    "thinking": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0},
+    "direct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0},
+    "legacy": {"temperature": 0.2},
+}
+SCHEMA_ERROR = re.compile(r"format|schema|grammar", re.I)
 
 
 class OllamaProvider:
@@ -34,6 +43,11 @@ class OllamaProvider:
         # Thinking models (qwen3, qwen3.5, ...) can spend minutes reasoning on a CPU before
         # answering; off by default, since the agent already gathers evidence step by step.
         self.think = os.getenv("OLLAMA_THINK", "false").strip().lower() in ("1", "true", "yes")
+        # Streamed thinking stops here and the caller writes the answer from the reasoning so far (about 1500
+        # tokens): past that, a small model mostly goes round in circles while the CPU clock runs.
+        self.max_thinking_chars = int(os.getenv("OLLAMA_MAX_THINKING_CHARS", "6000"))
+        self.sampling = os.getenv("OLLAMA_SAMPLING", "qwen").strip().lower()
+        self._schema_rejected = set()  # models whose Ollama refused a JSON schema: plain JSON mode for them
         self._capabilities = {}
         self.last_load_error = None
         self._status = None
@@ -137,53 +151,56 @@ class OllamaProvider:
                 converted.append({"role": role, "content": message.get("content") or ""})
         return converted
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):
-        """One chat call. `think` overrides OLLAMA_THINK for this call (thinking models only); with `on_delta`
-        the reply is streamed and on_delta(kind, text) is called with "thinking" and "content" pieces as they arrive."""
-        options = {"temperature": temperature, "num_ctx": self.num_ctx}
+    def _options(self, thinking, temperature, max_tokens):
+        options = dict(SAMPLING["legacy"] if self.sampling == "legacy" else SAMPLING["thinking" if thinking else "direct"])
+        if temperature is not None:
+            options["temperature"] = temperature
+        options["num_ctx"] = self.num_ctx
         if max_tokens:
             # Generation is the slowest part on a CPU; a cap keeps the worst case bounded.
             # Thinking tokens count toward it too, so thinking calls pass a larger cap.
             options["num_predict"] = int(max_tokens)
+        return options
+
+    def chat(self, messages, tools=None, json_mode=False, temperature=None, max_tokens=None, timeout=None, think=None, on_delta=None):
+        """One chat call. `think` overrides OLLAMA_THINK for this call (thinking models only); with `on_delta`
+        the reply is streamed and on_delta(kind, text) is called with "thinking" and "content" pieces as they arrive.
+        `json_mode` is True (any JSON) or a JSON schema the answer must follow (plain JSON if this Ollama refuses
+        schemas). `temperature` overrides the sampling profile's."""
         model = self.model
-        body = {
-            "model": model,
-            "messages": self._to_ollama(messages),
-            "stream": bool(on_delta),
-            "options": options,
-            "keep_alive": self.keep_alive,
-        }
+        thinking = False
+        body = {"model": model, "messages": self._to_ollama(messages), "stream": bool(on_delta), "keep_alive": self.keep_alive}
         if tools:
             body["tools"] = tools
         elif json_mode:
-            body["format"] = "json"
-        thinking = False
+            schema = isinstance(json_mode, dict) and model not in self._schema_rejected
+            body["format"] = json_mode if schema else "json"
         if self.supports_thinking(model):
             thinking = self.think if think is None else bool(think)
             body["think"] = thinking
+        body["options"] = self._options(thinking, temperature, max_tokens)
         deadline = timeout or self.timeout
-        with self._lock:
-            try:
-                if on_delta:
-                    status_code, error_text, payload = self._stream(body, deadline, on_delta)
-                else:
-                    response = httpx.post(f"{self.host}/api/chat", json=body, timeout=deadline)
-                    status_code, error_text = response.status_code, response.text[:300]
-                    payload = response.json() if status_code < 400 else {}
-            except httpx.TimeoutException as error:
-                raise LLMUnavailableError(f"Ollama did not answer within {int(deadline)}s (model may be too large for this machine)") from error
-            except httpx.HTTPError as error:
-                self._status = None
-                raise LLMUnavailableError(f"Ollama is not reachable at {self.host}: {error}") from error
+        status_code, error_text, payload = self._send(body, deadline, on_delta, thinking)
+        if status_code >= 400 and isinstance(body.get("format"), dict) and SCHEMA_ERROR.search(error_text or ""):
+            logger.warning("Ollama refused the JSON schema for %s (%s); using plain JSON mode", model, error_text)
+            self._schema_rejected.add(model)
+            body["format"] = "json"
+            status_code, error_text, payload = self._send(body, deadline, on_delta, thinking)
         if status_code == 404:
             raise LLMModelError(f"Model {model} is not available in Ollama. Run: ollama pull {model}")
         if status_code >= 400:
             logger.error("Ollama rejected request: %s", error_text)
             raise LLMModelError(f"Ollama rejected the request: {error_text}")
+        usage = {
+            "prompt_tokens": payload.get("prompt_eval_count"), "prompt_seconds": round((payload.get("prompt_eval_duration") or 0) / 1e9, 1),
+            "output_tokens": payload.get("eval_count"), "output_seconds": round((payload.get("eval_duration") or 0) / 1e9, 1),
+            "load_seconds": round((payload.get("load_duration") or 0) / 1e9, 1), "stopped": payload.get("done_reason"),
+        }
+        stopped = "" if usage["stopped"] in (None, "stop") else f", stopped: {usage['stopped']}"
         logger.info(
-            "Ollama %s%s: prompt %s tok in %.1fs, output %s tok in %.1fs (load %.1fs)",
-            model, " (thinking)" if thinking else "", payload.get("prompt_eval_count"), (payload.get("prompt_eval_duration") or 0) / 1e9,
-            payload.get("eval_count"), (payload.get("eval_duration") or 0) / 1e9, (payload.get("load_duration") or 0) / 1e9,
+            "Ollama %s%s: prompt %s tok in %.1fs, output %s tok in %.1fs (load %.1fs)%s",
+            model, " (thinking)" if thinking else "", usage["prompt_tokens"], usage["prompt_seconds"],
+            usage["output_tokens"], usage["output_seconds"], usage["load_seconds"], stopped,
         )
         message = payload.get("message", {})
         calls = []
@@ -196,10 +213,27 @@ class OllamaProvider:
                 except ValueError:
                     arguments = {}
             calls.append({"id": call.get("id") or uuid.uuid4().hex[:12], "name": function.get("name", ""), "arguments": arguments})
-        return {"content": clean_content(message.get("content")), "tool_calls": calls, "thinking": (message.get("thinking") or "").strip(), "model": model, "thought": thinking}
+        return {"content": clean_content(message.get("content")), "tool_calls": calls, "thinking": (message.get("thinking") or "").strip(),
+                "model": model, "thought": thinking, "usage": usage, "schema": isinstance(body.get("format"), dict)}
 
-    def _stream(self, body, deadline, on_delta):
-        """Stream /api/chat, enforcing an overall deadline (a read timeout alone never trips while tokens flow)."""
+    def _send(self, body, deadline, on_delta, thinking):
+        """One request, one generation at a time. Returns (status, error text, payload)."""
+        with self._lock:
+            try:
+                if on_delta:
+                    return self._stream(body, deadline, on_delta, self.max_thinking_chars if thinking else None)
+                response = httpx.post(f"{self.host}/api/chat", json=body, timeout=deadline)
+                return response.status_code, response.text[:300], (response.json() if response.status_code < 400 else {})
+            except httpx.TimeoutException as error:
+                raise LLMTimeoutError(f"Ollama did not answer within {int(deadline)}s (model may be too large for this machine)") from error
+            except httpx.HTTPError as error:
+                self._status = None
+                raise LLMDisconnectedError(f"Ollama is not reachable at {self.host}: {error}") from error
+
+    def _stream(self, body, deadline, on_delta, max_thinking_chars=None):
+        """Stream /api/chat, enforcing an overall deadline (a read timeout alone never trips while tokens flow) and
+        an optional thinking budget: past it the reasoning so far is returned and the generation is cancelled
+        (closing the stream makes Ollama stop)."""
         started = time.monotonic()
         message = {"content": "", "thinking": "", "tool_calls": []}
         final = {}
@@ -234,4 +268,7 @@ class OllamaProvider:
                 message["tool_calls"].extend(delta.get("tool_calls") or [])
                 if chunk.get("done"):
                     final = chunk
+                elif max_thinking_chars and not message["content"] and len(message["thinking"]) > max_thinking_chars:
+                    logger.info("Ollama thinking reached %s characters; writing the answer from it", max_thinking_chars)
+                    return 200, "", {"message": message, "done_reason": "thinking_budget"}
         return 200, "", {**final, "message": message}

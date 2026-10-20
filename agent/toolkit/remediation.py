@@ -155,7 +155,7 @@ def reset_network_stack():
 # Services and processes
 # ---------------------------------------------------------------------------
 
-@tool("restart_service", "Restart one allow-listed OS service; the allowed names depend on the OS (Windows: Spooler, wuauserv, BITS, Audiosrv, WlanSvc, W32Time; Linux: NetworkManager, cups; macOS: coreaudiod).", risk="medium",
+@tool("restart_service", "Restart one allow-listed OS service (the allowed names depend on the OS).", risk="medium",
       params={"name": {"type": "string", "maxLength": 100, "description": "Service name"}}, required=("name",), timeout=120)
 def restart_service(name):
     system = os_name()

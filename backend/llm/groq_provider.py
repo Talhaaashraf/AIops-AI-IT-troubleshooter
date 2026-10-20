@@ -51,8 +51,8 @@ class GroqProvider:
     def warm_up(self):
         return self.is_available()
 
-    def chat(self, messages, tools=None, json_mode=False, temperature=0.2, max_tokens=None, timeout=None, think=None, on_delta=None):  # noqa: ARG002 - same signature as Ollama
-        kwargs = {"model": self.model, "messages": self._to_openai(messages), "temperature": temperature}
+    def chat(self, messages, tools=None, json_mode=False, temperature=None, max_tokens=None, timeout=None, think=None, on_delta=None):  # noqa: ARG002 - same signature as Ollama
+        kwargs = {"model": self.model, "messages": self._to_openai(messages), "temperature": 0.2 if temperature is None else temperature}
         if max_tokens:
             kwargs["max_tokens"] = int(max_tokens)
         if tools:
@@ -80,4 +80,6 @@ class GroqProvider:
             except ValueError:
                 arguments = {}
             calls.append({"id": call.id, "name": call.function.name, "arguments": arguments})
-        return {"content": clean_content(message.content), "tool_calls": calls}
+        usage = getattr(response, "usage", None)
+        return {"content": clean_content(message.content), "tool_calls": calls, "thinking": "", "model": self.model, "thought": False,
+                "usage": {"prompt_tokens": getattr(usage, "prompt_tokens", None), "output_tokens": getattr(usage, "completion_tokens", None)}, "schema": False}

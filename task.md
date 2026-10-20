@@ -95,10 +95,12 @@ Push 1: dashboard, real server, Add Agent, evaluation
 - [~] Learned-case cleanup CLI: `python -m backend.learning.admin` (remove case 32 and test tickets)
 
 Push 2: diagnosis accuracy and speed
-- [ ] Fast mode: one non-thinking call with a JSON schema; Qwen3 sampling; partial-JSON recovery; deep mode with a thinking budget
-- [ ] Findings split into "can explain the complaint" and "separate problems"; generalised grounding and confidence calibration
-- [ ] Disk severity by free space; memory culprits grouped by app with tips; richer fast-mode evidence (device profile, startup names)
-- [ ] Solutions ranked by the cause, OS-aware tips, word-boundary playbook matching, retry on an Ollama disconnect
+- [~] Fast mode: one non-thinking call with a JSON schema (plain JSON if Ollama refuses it); Qwen3 sampling; partial-JSON recovery; deep mode thinks within a budget, then writes up
+- [~] Findings split into "can explain the complaint" and "separate problems" (`playbooks.RELATED_FINDINGS`); the AI names the finding it blames; a finding that cannot cause the complaint is replaced; confidence follows the evidence
+- [~] Disk severity by free space (shared by findings, alerts and health); memory culprits grouped per program with OS-specific tips; fast-mode evidence names startup items, programs and a device profile (no hostname)
+- [~] Solutions: the cause first, at most one for a separate problem, tips for the device's OS; whole-word playbook matching; one retry when Ollama drops the connection; the decision record says why the AI fell back
+- [~] Decision records written in the same millisecond no longer overwrite each other (an approval could vanish)
+- Offline evaluation, rules only (instant): cause 8/8, not wrongly blamed 8/8, confidence 8/8, OS-appropriate steps 8/8, first solution on the cause 8/8 (was 7/8 on four checks). The model's numbers come from the server run.
 
 Push 3: learning hygiene
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples

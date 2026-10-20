@@ -1140,7 +1140,7 @@ def agent_chat(payload: dict):
 
 @app.get("/api/ai/status")
 def ai_status_endpoint():
-    return {**ai_status(), "load_error": getattr(get_llm_provider(), "last_load_error", None), "suggest_only": True, "diagnosis_thinking": diagnosis_thinking(),
+    return {**ai_status(), "load_error": getattr(get_llm_provider(), "last_load_error", None), "suggest_only": True, "diagnosis_thinking": diagnosis_thinking(default_mode()),
             "diagnosis_mode": default_mode(), "learned_model": model_builder.version_info()}
 
 

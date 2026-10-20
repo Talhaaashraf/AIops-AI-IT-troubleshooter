@@ -13,7 +13,7 @@ import os
 
 from dotenv import load_dotenv
 
-from .base import LLMModelError, LLMUnavailableError
+from .base import LLMDisconnectedError, LLMModelError, LLMTimeoutError, LLMUnavailableError
 
 load_dotenv()
 
@@ -39,4 +39,4 @@ def get_provider():
     return _provider
 
 
-__all__ = ["LLMModelError", "LLMUnavailableError", "get_provider", "provider_name"]
+__all__ = ["LLMDisconnectedError", "LLMModelError", "LLMTimeoutError", "LLMUnavailableError", "get_provider", "provider_name"]

@@ -57,9 +57,13 @@ def record(kind, subject_id, payload):
     entry = {"kind": kind, "subject_id": subject_id, "recorded_at": now.isoformat(), **payload}
     try:
         day = decisions_dir() / now.strftime("%Y-%m-%d")
-        name = f"{now.strftime('%H%M%S%f')[:9]}_{kind}_{SAFE_PART.sub('-', str(subject_id or 'none'))[:40]}.json"
+        stamp, rest = now.strftime('%H%M%S%f')[:9], f"{kind}_{SAFE_PART.sub('-', str(subject_id or 'none'))[:40]}.json"
         with _lock:
             day.mkdir(parents=True, exist_ok=True)
+            # Two records of one subject can share a millisecond (an approval and its result; Windows' clock is
+            # coarse): a letter keeps the second from overwriting the first and still sorts it after.
+            name = next((candidate for candidate in (f"{stamp}{letter}_{rest}" for letter in ("",) + tuple("bcdefghijklmnopqrstuvwxyz"))
+                         if not (day / candidate).exists()), f"{now.strftime('%H%M%S%f')}z_{rest}")
             path = day / name
             path.write_text(json.dumps(entry, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
             index = day / "index.md"

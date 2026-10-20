@@ -83,6 +83,25 @@ def test_decisions_are_saved_as_json_and_indexed(tmp_path, monkeypatch):
         decision_log.record("not-a-kind", "x", {})
 
 
+def test_records_in_the_same_millisecond_are_all_kept(tmp_path, monkeypatch):
+    """Windows' clock can give an approval and its result the same timestamp: neither may overwrite the other."""
+    from datetime import datetime, timezone
+
+    frozen = datetime(2026, 10, 20, 9, 0, 0, 123000, tzinfo=timezone.utc)
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setenv("DECISIONS_DIR", str(tmp_path))
+    monkeypatch.setattr(decision_log, "datetime", FrozenClock)
+    paths = [decision_log.record("software_action", "job1", {"state": state}) for state in ("approved", "waiting", "finished")]
+    assert len(set(paths)) == 3
+    newest_first = [json.loads(pathlib.Path(tmp_path, item["file"]).read_text(encoding="utf-8"))["state"] for item in decision_log.recent(5)]
+    assert newest_first == ["finished", "waiting", "approved"]
+
+
 def test_rejecting_a_solution_is_recorded_and_runs_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("DECISIONS_DIR", str(tmp_path / "decisions"))
     session_id = session_store.create_session("local", "box", "Windows", "slow", None)
@@ -154,14 +173,15 @@ def test_reasoning_that_used_the_whole_budget_is_written_up_by_a_second_call(mon
     monkeypatch.setattr(planner.learning_store, "learned_fixes_for", lambda *args, **kwargs: [])
     monkeypatch.setattr(planner, "learn_from", lambda session_id: asyncio.sleep(0))
     monkeypatch.setenv("DIAGNOSIS_THINKING", "true")
+    monkeypatch.setenv("AGENT_MAX_STEPS", "0")  # thinking is for deep mode; no investigation round here
     session_id = session_store.create_session("local", "box", "Windows", "my disk is full", None)
 
-    asyncio.run(planner.run_diagnosis(session_id, mode="fast"))
+    asyncio.run(planner.run_diagnosis(session_id, mode="deep"))
 
     report = session_store.get_session(session_id)["report"]
     assert report["root_cause"] == "Disk C: is almost full"
     assert [call["think"] for call in calls] == [True, False] and calls[1]["last"].startswith("Your reasoning so far")
-    assert report["ai"]["thinking"] is True and "nearly full" in report["reasoning"]
+    assert report["ai"]["thinking"] is True and report["ai"]["handoff"] is True and "nearly full" in report["reasoning"]
     assert report["solutions"][0]["tool_id"] == "clear_temp_files" and 3 <= len(report["solutions"]) <= 4
 
 
