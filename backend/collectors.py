@@ -49,7 +49,8 @@ def get_cpu_info():
         "max_frequency_mhz": round(frequency.max, 2) if frequency else None,
         "current_frequency_mhz": round(frequency.current, 2) if frequency else None,
         "per_core_usage_percent": [round(value, 2) for value in per_core],
-        "total_usage_percent": round(psutil.cpu_percent(interval=None), 2),
+        # From the same 0.15 s sample: psutil's own total compares with the previous call, so the first one is always 0.
+        "total_usage_percent": round(sum(per_core) / len(per_core), 2) if per_core else round(psutil.cpu_percent(interval=None), 2),
     }
 
 

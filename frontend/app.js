@@ -426,7 +426,7 @@ function renderPerfAi(job) {
   panel.classList.remove('hidden');
   const running = job.state === 'running';
   panel.innerHTML = `<div class="section-heading">
-      <div><p class="kicker">AI analysis · deep thinking</p><h2>What is slowing this computer down?</h2>
+      <div><p class="kicker">AI analysis</p><h2>What is slowing this computer down?</h2>
         <p class="soft-label">${running ? 'Available when the test finishes.' : 'The AI reads these results, thinks it through and suggests 3-4 ranked fixes. It never changes anything itself: each fix runs only if you approve it.'}</p></div>
       <div class="button-row">
         <label class="think-toggle" title="Also lets the AI run extra read-only checks; takes several minutes longer"><input type="checkbox" id="perf-think"> Think deeper</label>

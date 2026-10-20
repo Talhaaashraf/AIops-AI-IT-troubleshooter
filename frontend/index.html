@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=20261019a">
+  <link rel="stylesheet" href="/static/style.css?v=20261020a">
   <script>
     try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
   </script>
@@ -183,10 +183,10 @@
             <p class="field-label">Speed</p>
             <div id="ts-mode" class="mode-toggle" role="radiogroup" aria-label="Diagnosis speed">
               <button type="button" class="mode-option" data-mode="instant" role="radio" aria-checked="false"><strong>Instant</strong><small>Rule checks only, seconds</small></button>
-              <button type="button" class="mode-option active" data-mode="fast" role="radio" aria-checked="true"><strong>AI diagnosis</strong><small>Checks + deep-thinking AI</small></button>
-              <button type="button" class="mode-option" data-mode="deep" role="radio" aria-checked="false"><strong>Deep AI</strong><small>AI runs more checks first</small></button>
+              <button type="button" class="mode-option active" data-mode="fast" role="radio" aria-checked="true"><strong>AI diagnosis</strong><small>Checks + one direct AI answer</small></button>
+              <button type="button" class="mode-option" data-mode="deep" role="radio" aria-checked="false"><strong>Deep AI</strong><small>AI runs more checks and thinks first</small></button>
             </div>
-            <p class="soft-label ts-mode-note">AI diagnoses think deeply before answering, so expect about 5-10 minutes on a laptop CPU. You can watch the reasoning live. Instant needs no AI.</p>
+            <p class="soft-label ts-mode-note">AI diagnosis answers directly, in about 1-3 minutes on a laptop CPU. Deep AI also runs extra checks and thinks first (5-15 minutes, reasoning shown live). Instant needs no AI.</p>
             <div class="ts-actions">
               <button id="ts-start" class="primary-button"><svg><use href="#i-spark"/></svg>Diagnose</button>
               <span id="ts-form-status" class="soft-label"></span>
@@ -553,6 +553,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261019a"></script>
+  <script src="/static/app.js?v=20261020a"></script>
 </body>
 </html>
