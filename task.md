@@ -84,7 +84,8 @@ RAM was 93%), 11-13 minutes per answer, rule fallbacks, a dashboard stuck on "Wa
 the PC. The app now deploys to an Ubuntu server (GitHub Actions, self-hosted runner, 16 GB, no GPU): **nothing runs on the dev
 laptop**. Code and unit tests are checked there; live checks run on the server, done by the user (`[~]` until then).
 
-Push 1: dashboard, real server, Add Agent, evaluation
+### Push 1: dashboard, real server, Add Agent, evaluation
+
 - [~] AI work on its own thread pool, queued diagnoses wait without holding threads (`backend/workers.py`); live monitor on its own pool with a cached snapshot; errors logged and shown instead of swallowed
 - [~] "This server" is the AIops agent on the host (`backend/server_identity.py`, `AIOPS_SERVER_HOSTNAME` written by the deploy workflow); in Docker the container is no longer offered as a device to diagnose
 - [~] Dashboard footer says "connected" only once data arrives, names the source, and offers "Install the agent on this server"
@@ -94,7 +95,8 @@ Push 1: dashboard, real server, Add Agent, evaluation
 - [~] Evaluation: `python -m backend.agent_brain.evaluate` scores 8 real-ticket scenarios (baseline before Push 2)
 - [~] Learned-case cleanup CLI: `python -m backend.learning.admin` (remove case 32 and test tickets)
 
-Push 2: diagnosis accuracy and speed
+### Push 2: diagnosis accuracy and speed
+
 - [~] Fast mode: one non-thinking call with a JSON schema (plain JSON if Ollama refuses it); Qwen3 sampling; partial-JSON recovery; deep mode thinks within a budget, then writes up
 - [~] Findings split into "can explain the complaint" and "separate problems" (`playbooks.RELATED_FINDINGS`); the AI names the finding it blames; a finding that cannot cause the complaint is replaced; confidence follows the evidence
 - [~] Disk severity by free space (shared by findings, alerts and health); memory culprits grouped per program with OS-specific tips; fast-mode evidence names startup items, programs and a device profile (no hostname)
@@ -102,7 +104,8 @@ Push 2: diagnosis accuracy and speed
 - [~] Decision records written in the same millisecond no longer overwrite each other (an approval could vanish)
 - Offline evaluation, rules only (instant): cause 8/8, not wrongly blamed 8/8, confidence 8/8, OS-appropriate steps 8/8, first solution on the cause 8/8 (was 7/8 on four checks). The model's numbers come from the server run.
 
-Verification on the dev laptop, 2026-10-20 (no Docker, no server, nothing listening on a port)
+### Verification on the dev laptop, 2026-10-20 (no Docker, no server, nothing listening on a port)
+
 - Unit tests: 164 passed.
 - In-process end-to-end (`verify_app.py` in the session scratchpad): the real app with a throw-away database; a simulated agent enrolled
   with a one-time token, sent a real report of the laptop and served the server's tasks. Read-only tools ran for real; every
@@ -117,9 +120,11 @@ Verification on the dev laptop, 2026-10-20 (no Docker, no server, nothing listen
 - Still to check on the server (the user): the real qwen3:4b answers and timings (`evaluate --mode fast`), Ollama accepting the
   JSON schema with thinking, nginx/ngrok, the host agent install, and the cleanup of case 32.
 
-Push 3: learning hygiene
+### Push 3: learning hygiene
+
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples
 
-Push 4: Groq as an optional, clearly labelled cloud choice; docs
+### Push 4: Groq as an optional, clearly labelled cloud choice; docs
+
 - [ ] Groq selectable in the model switcher after a cloud warning; local stays the default
 - [ ] README, docs/04, docs/05, .env.example
