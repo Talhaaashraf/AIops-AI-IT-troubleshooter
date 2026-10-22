@@ -1430,8 +1430,10 @@ def _server_url(request, override=None):
 
 
 def open_enrollment():
-    """When true, install scripts need no enrollment token: each agent generates its own secret."""
-    return os.getenv("OPEN_ENROLLMENT", "false").strip().lower() in ("1", "true", "yes")
+    """On by default: Add Agent shows an install command with no token; each agent generates its own secret, so
+    every device is a separate device and a re-install keeps its identity. OPEN_ENROLLMENT=false brings back the
+    one-time tokens (for a public address, where anyone who knows the URL could otherwise add a device)."""
+    return os.getenv("OPEN_ENROLLMENT", "true").strip().lower() in ("1", "true", "yes")
 
 
 @app.get("/api/agents/enrollment")

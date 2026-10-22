@@ -90,10 +90,10 @@ with sync_playwright() as playwright:
     check("dashboard shows live data and says whose", "connected" in footer.lower() and "Waiting" not in source, f"{footer.splitlines()[0]} / {source}")
     page.screenshot(path=str(OUT / "01-dashboard.png"))
 
-    # Add Agent: the install command is ready without pasting any key (a one-time token is made on open).
+    # Add Agent: the install command is ready at once, with no key to paste (and no token unless OPEN_ENROLLMENT=false).
     page.click("button.nav-item[data-tab=add-agent]")
-    page.wait_for_function("document.getElementById('install-command').textContent.includes('token=')", timeout=15000)
-    check("Add Agent makes a token without any key", page.locator("#admin-key-input").count() == 0, page.inner_text("#token-result"))
+    page.wait_for_function("document.getElementById('install-command').textContent.includes('/install/windows.ps1')", timeout=15000)
+    check("Add Agent: install command ready to copy", page.locator("#admin-key-input").count() == 0 and not page.locator("#copy-install").is_disabled(), page.inner_text("#install-command")[:120])
     page.click("button.nav-item[data-tab=dashboard]")
 
     page.click("#ai-chip")

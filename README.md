@@ -64,20 +64,22 @@ More detail: [docs/04-docker.md](docs/04-docker.md). Moving to another PC: [docs
 
 ## Add devices (agents)
 
-1. Open **Add Agent**. Check the server address: the ngrok https URL, or `http://<LAN IP>`.
-2. A one-time token is created when the page opens (the dashboard login is enough; no key to paste). It is single-use and valid for 24 hours; **New token** makes another.
-3. Run the command on the device:
+1. Open **Add Agent**. Check the server address: `http://<server IP>` on the LAN, or the ngrok https URL.
+2. Copy the command for the device's system and run it there. No token is needed: the same command works on every device, each
+   device becomes its own entry, and running it again on a device keeps that device.
 
    ```powershell
    # Windows: PowerShell as Administrator
-   irm "http://SERVER/install/windows.ps1?token=TOKEN" | iex
+   irm "http://SERVER/install/windows.ps1" | iex
    ```
 
    ```bash
    # Linux / macOS
-   curl -fsSL "http://SERVER/install/linux.sh?token=TOKEN" | sudo bash
-   curl -fsSL "http://SERVER/install/macos.sh?token=TOKEN" | sudo bash
+   curl -fsSL "http://SERVER/install/linux.sh" | sudo bash
+   curl -fsSL "http://SERVER/install/macos.sh" | sudo bash
    ```
+
+   With `OPEN_ENROLLMENT=false` the page adds a one-time token (single use, 24 hours) to the command instead.
 
 The script installs the agent from `agent_builds/` when a prebuilt binary exists, otherwise from the Python bundle. It runs as SYSTEM on Windows (a Scheduled Task), as a systemd unit on Linux and as a LaunchDaemon on macOS. The page waits until the device connects.
 
@@ -144,7 +146,8 @@ Optional per-device limits in the agent's `agent_config.json`:
   - `decisions/` holds device data, so it is git-ignored.
 - **Access.**
   - The dashboard, its API and WebSockets need the `DASHBOARD_PASSWORD` login.
-  - Agents use their own tokens. Install scripts need a one-time enrollment token unless `OPEN_ENROLLMENT=true`, which is for a trusted LAN only.
+  - Agents use their own secret, which the install script generates on the device. By default anyone who can reach the server's
+    address can add a device (`OPEN_ENROLLMENT=true`); set it to `false` for one-time tokens when the address is public (ngrok).
   - Behind ngrok the session cookie is `Secure`, and nginx rate-limits login attempts.
   - Never publish port 8000 to the internet.
 
@@ -170,7 +173,7 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `ADMIN_API_KEY` | none | `X-Admin-Key` for `DELETE /api/agents/{id}`; also the login password when `DASHBOARD_PASSWORD` is empty |
 | `DASHBOARD_PASSWORD` | none | Turns on the dashboard login |
 | `ONBOARDING_CHECK` | `true` | AI check-up the first time a device reports |
-| `OPEN_ENROLLMENT` | `false` | Enroll agents without a token (trusted LAN only) |
+| `OPEN_ENROLLMENT` | `true` | Install commands need no token; `false` asks for one-time tokens (use it with a public address) |
 | `SENTINEL_PUBLIC_URL` | browser URL | Server address written into install commands |
 | `AIOPS_SERVER_HOSTNAME` | written by the deploy workflow | The host's name: its AIops agent is shown as "This server" instead of the container |
 | `AIOPS_SERVER_DEVICE_ID` | empty | Pins "This server" to one agent when several have the host's name |

@@ -37,7 +37,7 @@ How it works:
 - ngrok sits at a fixed address on a private network, so nginx trusts forwarding headers only from it. That gives the app the visitor's real IP and https, and the session cookie becomes `Secure`.
 - Install scripts and agents send `ngrok-skip-browser-warning`, so ngrok's warning page does not get in the way.
 
-Free ngrok URLs change every time ngrok restarts. Devices installed with an old URL then need the install command again. Keep `OPEN_ENROLLMENT=false` while the URL is public.
+Free ngrok URLs change every time ngrok restarts. Devices installed with an old URL then need the install command again. Set `OPEN_ENROLLMENT=false` while the URL is public: otherwise anyone who finds it can add a device.
 
 ## Things to know
 
@@ -55,10 +55,10 @@ Free ngrok URLs change every time ngrok restarts. Devices installed with an old 
 - **Stop:** `docker compose down` keeps the data. `docker compose down -v` also deletes the volumes: the database and the downloaded models.
 - **Back up or move the data:** see [07-moving-to-another-pc.md](07-moving-to-another-pc.md).
 
-## LAN hosting with tokenless enrollment
+## LAN hosting with tokenless enrollment (the default)
 
 - Set `SENTINEL_PUBLIC_URL=http://<your-LAN-IP>` (nginx, port 80) in `.env`. Install commands then point agents at that address.
-- With `OPEN_ENROLLMENT=true`, the Add Agent tab skips the token step.
+- With `OPEN_ENROLLMENT=true` (the default), the Add Agent tab has no token step: open it and run the command.
   - The install script generates a random 256-bit secret on the device, and the device registers with it.
   - Re-running the script keeps the same device and only updates the server address. Run it again whenever the server's address changes.
 - The prebuilt `agent_builds/windows/DeviceHealthAgent.exe` (from `agent/build_windows.ps1`) is mounted into the container, so Windows devices do not need Python.

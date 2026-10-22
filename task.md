@@ -120,6 +120,12 @@ laptop**. Code and unit tests are checked there; live checks run on the server, 
 - Still to check on the server (the user): the real qwen3:4b answers and timings (`evaluate --mode fast`), Ollama accepting the
   JSON schema with thinking, nginx/ngrok, the host agent install, and the cleanup of case 32.
 
+### Add Agent: open and install
+
+- [~] No token step by default (`OPEN_ENROLLMENT` defaults to true): the same install command works on every Windows, Linux and macOS
+  device, each device makes its own secret, and a re-install keeps the device. `OPEN_ENROLLMENT=false` brings back one-time tokens
+  for a public address
+
 ### Push 3: learning hygiene
 
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples

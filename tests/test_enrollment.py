@@ -81,7 +81,7 @@ def test_expired_and_surplus_enrollment_tokens_are_purged():
 def test_the_newest_token_survives_even_when_many_share_one_clock_tick(monkeypatch):
     from datetime import datetime, timezone
 
-    frozen = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+    frozen = datetime.now(timezone.utc)  # one instant for every token (not a fixed date that later lies in the past)
 
     class Clock(datetime):
         @classmethod
@@ -92,3 +92,32 @@ def test_the_newest_token_survives_even_when_many_share_one_clock_tick(monkeypat
     tokens = [device_store.create_pending_token()[0] for _ in range(device_store.MAX_PENDING_TOKENS + 5)]
     monkeypatch.setattr(device_store, "datetime", datetime)
     assert device_store.is_valid_install_token(tokens[-1]) and not device_store.is_valid_install_token(tokens[0])
+
+
+def test_by_default_any_device_installs_with_the_same_command_and_no_token(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from backend import main
+
+    monkeypatch.delenv("OPEN_ENROLLMENT", raising=False)
+    client = TestClient(main.app)
+    for script in ("windows.ps1", "linux.sh", "macos.sh"):
+        body = client.get(f"/install/{script}")
+        assert body.status_code == 200 and "__TOKEN__" not in body.text, script
+    assert client.get("/api/agents/bundle").content[:2] == b"PK"
+    # Two laptops run the same command: each makes its own secret and becomes its own device.
+    first = client.post("/api/agents/register", json={"token": "a" * 43, "hostname": "laptop-1", "os_type": "Windows"}).json()
+    second = client.post("/api/agents/register", json={"token": "b" * 43, "hostname": "macbook", "os_type": "Darwin"}).json()
+    again = client.post("/api/agents/register", json={"token": "a" * 43, "hostname": "laptop-1", "os_type": "Windows"}).json()
+    assert first["device_id"] != second["device_id"] and again["device_id"] == first["device_id"]
+
+
+def test_one_time_tokens_come_back_when_open_enrollment_is_off(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from backend import main
+
+    monkeypatch.setenv("OPEN_ENROLLMENT", "false")
+    client = TestClient(main.app)
+    assert client.get("/install/linux.sh").status_code == 401
+    assert client.post("/api/agents/register", json={"token": "c" * 43, "hostname": "stranger", "os_type": "Linux"}).status_code == 401
