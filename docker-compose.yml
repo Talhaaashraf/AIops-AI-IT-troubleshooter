@@ -6,9 +6,17 @@
 # same Ollama and writes its Modelfile to ./models/aiops-brain/.
 name: sentinel
 
+# Docker keeps container logs forever by default; three files of 10 MB per container is plenty to debug with.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   ollama:
     image: ollama/ollama:latest
+    logging: *logging
     restart: unless-stopped
     environment:
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
@@ -31,6 +39,7 @@ services:
   # One-shot: register the migrated base model from ./models with the ollama service.
   model-init:
     image: ollama/ollama:latest
+    logging: *logging
     depends_on:
       ollama:
         condition: service_healthy
@@ -57,14 +66,15 @@ services:
   sentinel:
     build: .
     image: sentinel-troubleshooter:latest
+    logging: *logging
     restart: unless-stopped
     depends_on:
       model-init:
         condition: service_completed_successfully
-    # New installs go through nginx (port 80) or ngrok. Port 8000 stays published only because agents
-    # installed earlier still report to :8000; once they are reinstalled, change it to "127.0.0.1:8000:8000".
+    # Devices and browsers come in through nginx (port 80: login rate limit, proxy headers) or ngrok. Port 8000
+    # answers only on the server itself, for debugging (curl http://127.0.0.1:8000/login).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - path: .env
         required: false
@@ -90,6 +100,7 @@ services:
   # Reverse proxy: LAN users on port 80, and the target ngrok publishes.
   nginx:
     image: nginx:1.27-alpine
+    logging: *logging
     restart: unless-stopped
     depends_on:
       sentinel:
@@ -112,6 +123,7 @@ services:
   # The free plan gives a random URL that changes on every restart (re-run agent installs after a change).
   ngrok:
     image: ngrok/ngrok:3-alpine
+    logging: *logging
     restart: unless-stopped
     depends_on:
       nginx:

@@ -22,7 +22,7 @@ Settings come from `.env` (`env_file`). Compose overrides `OLLAMA_HOST`, `SENTIN
 ## Ports
 
 - **80 (nginx)** is the address for browsers and for agents installed from Add Agent.
-- **8000 (the app)** is still published because agents installed before nginx was added report to `:8000`. Once every device has been reinstalled, change it to `"127.0.0.1:8000:8000"` in `docker-compose.yml`. Never forward port 8000 from the internet.
+- **8000 (the app)** answers only on the server itself (`127.0.0.1:8000`), for debugging. Devices and browsers use nginx on port 80, so set `SENTINEL_PUBLIC_URL=http://<server IP>` (no `:8000`). An agent installed with an old `:8000` address must re-run the install command.
 - **4040** is the ngrok inspector, reachable only from this PC.
 
 ## Public URL (ngrok)
@@ -63,6 +63,29 @@ Free ngrok URLs change every time ngrok restarts. Devices installed with an old 
   - Re-running the script keeps the same device and only updates the server address. Run it again whenever the server's address changes.
 - The prebuilt `agent_builds/windows/DeviceHealthAgent.exe` (from `agent/build_windows.ps1`) is mounted into the container, so Windows devices do not need Python.
 - Trade-off: anyone who can reach the server can attach a new device. They cannot read or control other devices, and the dashboard still needs the password. Use this only on a trusted network.
+
+## Backups
+
+`deploy/backup.sh` makes one file a day with the database (a consistent copy, taken while the app runs), the
+`decisions/` folder and `~/app-config/.env`, and keeps 14 days. The files hold the dashboard password and device data
+(owner-only). Install it on the server once:
+
+```bash
+mkdir -p ~/bin && cp deploy/backup.sh ~/bin/aiops-backup.sh && chmod 700 ~/bin/aiops-backup.sh
+(crontab -l 2>/dev/null; echo "30 2 * * * $HOME/bin/aiops-backup.sh >> $HOME/backups/aiops/backup.log 2>&1") | crontab -
+```
+
+**Restore** (from the deploy folder, newest backup):
+
+```bash
+f=$(ls -t ~/backups/aiops/aiops-*.tar.gz | head -1); mkdir -p /tmp/restore && tar xzf "$f" -C /tmp/restore
+docker compose stop sentinel
+docker compose cp /tmp/restore/sentinel.db sentinel:/data/sentinel.db
+docker compose start sentinel
+```
+
+The decision records are in `/tmp/restore/decisions/` and the settings in `/tmp/restore/app-config.env`.
+Copy a backup off the server now and then (a USB drive or another machine): a dead disk takes the backups with it.
 
 ## Troubleshooting: an agent shows up, then goes offline
 

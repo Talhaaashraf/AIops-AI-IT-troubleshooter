@@ -126,6 +126,15 @@ laptop**. Code and unit tests are checked there; live checks run on the server, 
   device, each device makes its own secret, and a re-install keeps the device. `OPEN_ENROLLMENT=false` brings back one-time tokens
   for a public address
 
+### Production on the Ubuntu server (2026-10-23)
+
+- [x] Server settings filled in (`~/app-config/.env` was empty, so the dashboard had no login and Add Agent could not work); model `qwen3:4b` (the server has 7.1 GB RAM); Windows agent exe in `agent_builds/windows/`
+- [x] Install commands go through nginx on port 80 (`SENTINEL_PUBLIC_URL=http://10.164.68.170`); model kept loaded for 2 h
+- [x] Daily backup at 02:30 (`deploy/backup.sh` as `~/bin/aiops-backup.sh`, 14 days, `~/backups/aiops/`), tested once
+- [x] Old copies removed after a backup (`~/backups/aiops-old-copies-20261023.tar.gz`); the repo rename to `AIops-AI-IT-troubleshooter` moved the deploy folder
+- [~] Log rotation (3 x 10 MB per container) and port 8000 only on the server: applied by the next deploy
+- [~] Real-model evaluation (`evaluate --mode fast`) on the server
+
 ### Push 3: learning hygiene
 
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples

@@ -53,7 +53,7 @@ docker compose ps
 | Service | Role |
 | --- | --- |
 | `nginx` | Reverse proxy on **port 80**: the address for the browser and for new agents. |
-| `sentinel` | The FastAPI app. Its database lives in the `sentinel_data` volume. Port 8000 is also published so agents installed before nginx keep reporting; once every agent is reinstalled, restrict it to `127.0.0.1:8000:8000`. |
+| `sentinel` | The FastAPI app. Its database lives in the `sentinel_data` volume. Port 8000 answers only on the server itself (`127.0.0.1`); devices and browsers use nginx on port 80. |
 | `ollama` | The local AI. Models live in the `ollama_data` volume. |
 | `model-init` | Loads the base model once at startup, then exits. |
 | `ngrok` | Optional: publishes nginx on a public https URL when `NGROK_AUTHTOKEN` is set. |
