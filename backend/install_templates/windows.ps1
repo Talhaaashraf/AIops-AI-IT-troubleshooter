@@ -257,7 +257,8 @@ for ($i = 0; $i -lt 90 -and -not $connected; $i++) {
   Start-Sleep -Seconds 1
   if (Test-Path $logPath) {
     $connected = [bool](Select-String -Path $logPath -Pattern 'Report sent' -Quiet)
-    $registered = [bool](Select-String -Path $logPath -Pattern 'started for device' -Quiet)
+    # "Registered with the server" is written only when the server accepted this device (not on every start).
+    $registered = [bool](Select-String -Path $logPath -Pattern 'Registered with the server' -Quiet)
   }
   # Once registered, give the first report a little longer, then stop waiting.
   if ($registered -and $i -ge 45) { break }

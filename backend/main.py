@@ -36,7 +36,7 @@ from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_statu
 from .alert_store import add_alert, get_alerts
 from .auth import SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_session, is_public_path, session_token
 from .collectors import collect_report
-from .device_store import claim_onboarding, create_pending_token, delete_device, get_device, get_device_by_token, get_latest_report, is_valid_install_token, list_devices, mark_offline_devices, register_device, save_report, set_onboarding_session
+from .device_store import MIN_SELF_TOKEN_LENGTH, claim_onboarding, create_pending_token, delete_device, get_device, get_device_by_token, get_latest_report, is_valid_install_token, list_devices, mark_offline_devices, register_device, save_report, set_onboarding_session
 from .event_logs import collect_event_log_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
@@ -434,9 +434,28 @@ def authenticated_device(request: Request):
     return device
 
 
+def _device_for_report(request, payload):
+    """The reporting device. With open enrollment, an agent this server does not know yet (installed against
+    another server, or the database was reset) is enrolled from its report, with the secret it already uses:
+    open enrollment lets any agent register anyway, and otherwise it would retry with a rejected token forever."""
+    try:
+        return authenticated_device(request)
+    except HTTPException:
+        token = request.headers.get("Authorization", "")[7:].strip()
+        if not open_enrollment() or len(token) < MIN_SELF_TOKEN_LENGTH or not isinstance(payload.get("diagnostics"), dict):
+            raise
+    system = payload["diagnostics"].get("system") or {}
+    claimed = payload.get("device_id")
+    # The id the agent remembers is reused unless another device holds it.
+    device_id = claimed if isinstance(claimed, str) and not get_device(claimed) else None
+    device = register_device(token, str(system.get("hostname") or "Unknown"), str(system.get("os_name") or "Unknown"), device_id=device_id, allow_open=True)
+    logger.info("Enrolled %s (%s) from its first report: this server did not know its token", device["device_id"], device["hostname"])
+    return device
+
+
 @app.post("/api/agents/report")
 def agent_report(payload: dict, request: Request):
-    device = authenticated_device(request)
+    device = _device_for_report(request, payload)
     diagnostics_payload = payload.get("diagnostics")
     if not isinstance(diagnostics_payload, dict):
         raise HTTPException(status_code=400, detail="diagnostics object is required")

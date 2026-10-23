@@ -121,3 +121,66 @@ def test_one_time_tokens_come_back_when_open_enrollment_is_off(monkeypatch):
     client = TestClient(main.app)
     assert client.get("/install/linux.sh").status_code == 401
     assert client.post("/api/agents/register", json={"token": "c" * 43, "hostname": "stranger", "os_type": "Linux"}).status_code == 401
+
+
+def _report(token, hostname="old-laptop", device_id="agent-a90854fe9061"):
+    return {"device_id": device_id, "diagnostics": {"system": {"hostname": hostname, "os_name": "Windows"}, "cpu": {}, "memory": {}}}
+
+
+def test_an_agent_from_another_server_is_enrolled_by_its_first_report(monkeypatch):
+    """An agent installed against an old server keeps its secret and device id; the new server must accept it."""
+    from fastapi.testclient import TestClient
+
+    from backend import main
+
+    monkeypatch.delenv("OPEN_ENROLLMENT", raising=False)
+    monkeypatch.setenv("ONBOARDING_CHECK", "false")
+    client = TestClient(main.app)
+    secret = "s" * 43
+    first = client.post("/api/agents/report", json=_report(secret), headers={"Authorization": f"Bearer {secret}"})
+    assert first.status_code == 200 and first.json()["device_id"] == "agent-a90854fe9061"
+    assert client.get("/api/agents/tasks/next?wait=1", headers={"Authorization": f"Bearer {secret}"}).status_code == 200
+    # Another agent claiming the same id gets an id of its own instead of taking that device over.
+    other = "o" * 43
+    second = client.post("/api/agents/report", json=_report(other, "desktop"), headers={"Authorization": f"Bearer {other}"})
+    assert second.status_code == 200 and second.json()["device_id"] not in ("agent-a90854fe9061", None)
+
+
+def test_an_unknown_agent_is_still_refused_when_enrollment_is_closed(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from backend import main
+
+    monkeypatch.setenv("OPEN_ENROLLMENT", "false")
+    client = TestClient(main.app)
+    assert client.post("/api/agents/report", json=_report("t" * 43), headers={"Authorization": f"Bearer {'t' * 43}"}).status_code == 401
+    assert client.post("/api/agents/report", json=_report("short"), headers={"Authorization": "Bearer short"}).status_code == 401
+
+
+def test_the_agent_registers_again_when_the_server_does_not_know_it(monkeypatch, tmp_path):
+    from agent import monitor_agent
+
+    class Response:
+        def __init__(self, status, body=None):
+            self.status_code, self._body, self.text = status, body or {}, ""
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise monitor_agent.requests.HTTPError(str(self.status_code))
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append(url.rsplit("/", 1)[-1])
+        return Response(401) if url.endswith("/report") else Response(200, {"device_id": "agent-000000000001"})
+
+    monkeypatch.setattr(monitor_agent.requests, "request", fake_request)
+    monkeypatch.setattr(monitor_agent, "save_config", lambda config: None)
+    with pytest.raises(monitor_agent.NotEnrolled):  # a 401 is not retried forever
+        monitor_agent.request_with_retry("POST", "http://server/api/agents/report", json={})
+    config = {"server_url": "http://server", "AGENT_TOKEN": "x" * 43, "device_id": "agent-old"}
+    config.pop("device_id")
+    assert monitor_agent.register_until_accepted(config) == "agent-000000000001" and calls == ["report", "register"]

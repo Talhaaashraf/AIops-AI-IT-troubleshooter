@@ -199,12 +199,18 @@ def _headers(extra=None):
     return {**DEFAULT_HEADERS, **(extra or {})}
 
 
+class NotEnrolled(Exception):
+    """The server rejected this device's token (401): it does not know this device."""
+
+
 def request_with_retry(method, url, **kwargs):
     kwargs["headers"] = _headers(kwargs.get("headers"))
     delay = 1
     while True:
         try:
             response = requests.request(method, url, timeout=15, **kwargs)
+            if response.status_code == 401:
+                raise NotEnrolled(f"{url} answered 401: {response.text[:200]}")
             response.raise_for_status()
             return response
         except requests.RequestException as error:
@@ -221,7 +227,18 @@ def register(config):
     device_id = response.json()["device_id"]
     config["device_id"] = device_id
     save_config(config)
+    logging.info("Registered with the server as %s", device_id)
     return device_id
+
+
+def register_until_accepted(config):
+    """Register; a server that refuses the token (enrollment closed, token unknown) is asked again later."""
+    while True:
+        try:
+            return register(config)
+        except NotEnrolled as error:
+            logging.error("The server refused this device (%s). Re-run the install command from Add Agent; retrying in 60 s", error)
+            time.sleep(60)
 
 
 def _task_result_for(config, task):
@@ -297,7 +314,7 @@ def task_worker(config, device_id):
 
 def run():
     config = load_config()
-    device_id = register(config)
+    device_id = register_until_accepted(config)
     threading.Thread(target=task_worker, args=(config, device_id), name="sentinel-tasks", daemon=True).start()
     previous = None
     interval = max(2, int(config.get("interval_seconds", DEFAULT_INTERVAL)))
@@ -322,6 +339,12 @@ def run():
         try:
             request_with_retry("POST", config["server_url"].rstrip("/") + "/api/agents/report", headers={"Authorization": "Bearer " + config["AGENT_TOKEN"]}, json=payload)
             logging.info("Report sent; spike_detected=%s", spike)
+        except NotEnrolled:
+            # A new server, or its database was reset: register again with the same secret (the task worker
+            # uses the same token, so it recovers on its own).
+            logging.warning("The server does not know this device; registering again")
+            config.pop("device_id", None)
+            device_id = register_until_accepted(config)
         except Exception:
             logging.exception("Unexpected report failure")
         previous = report
