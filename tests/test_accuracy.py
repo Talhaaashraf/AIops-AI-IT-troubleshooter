@@ -266,3 +266,10 @@ def test_slower_and_unknown_systems_are_handled():
     assert len(playbook_tips(get_playbook("slow_pc"), "Unknown")) >= 3
     found = findings.analyze(CASES_BY_ID["slow_memory_win"]["evidence"], "Unknown")
     assert "Activity Monitor" not in json.dumps(next(item for item in found if item["key"] == "ram_high")["tips"])
+
+
+def test_the_models_finding_labels_never_reach_the_person():
+    assert planner.without_finding_ids("F2 [high] 30% packet loss to the router: the network is unreliable.") == "30% packet loss to the router: the network is unreliable."
+    assert planner.without_finding_ids("The print spooler is stopped (F1), and 2 jobs are stuck (see F3).") == "The print spooler is stopped, and 2 jobs are stuck."
+    assert planner.without_finding_ids("Memory (F1 and F2) is full") == "Memory is full"
+    assert planner.without_finding_ids("Fix the FAT32 drive") == "Fix the FAT32 drive"  # only the labels go

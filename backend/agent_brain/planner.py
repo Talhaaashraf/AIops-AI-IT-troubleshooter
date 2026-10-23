@@ -51,7 +51,7 @@ TOOL_RESULT_CHARS = 1200
 REPORT_EVIDENCE_CHARS = 700
 MAX_CALLS_PER_TURN = 3
 # Output cap for the report / verify calls: generation is the slowest part on a CPU. 4 solutions with steps fit.
-REPORT_MAX_TOKENS = 600
+REPORT_MAX_TOKENS = 700
 # With deep thinking the reasoning tokens count toward the cap; the provider also stops the reasoning itself
 # after OLLAMA_MAX_THINKING_CHARS, so this is only the hard limit.
 REPORT_THINKING_MAX_TOKENS = 2400
@@ -541,6 +541,24 @@ def normalize_report(raw, issue, os_type, fallback_note=None, evidence=None):
     }
 
 
+FINDING_LABEL = re.compile(r"^\s*F\d+\s*(?:\[[a-z]+\])?\s*[:\-]?\s*")
+FINDING_REFERENCE = re.compile(r"\s*\((?:see\s+)?F\d+(?:\s*(?:,|and)\s*F\d+)*\)", re.I)
+
+
+def without_finding_ids(text):
+    """The F1, F2... labels are for the model's answer only; a person reading the diagnosis does not know them."""
+    return FINDING_REFERENCE.sub("", FINDING_LABEL.sub("", str(text or ""))).strip()
+
+
+def hide_finding_ids(report):
+    report["root_cause"] = without_finding_ids(report.get("root_cause"))
+    for solution in report.get("solutions") or []:
+        solution["title"] = without_finding_ids(solution.get("title"))
+        solution["why"] = without_finding_ids(solution.get("why"))
+        solution["steps"] = [without_finding_ids(step) for step in solution.get("steps") or []]
+    return report
+
+
 def tail_at_sentence(text, limit=3000):
     """The end of a long reasoning text, starting at a sentence (not mid-word), marked when cut."""
     text = (text or "").strip()
@@ -948,6 +966,7 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
         return report, similar, found
     raw.setdefault("evidence", evidence_facts(found, evidence))
     report = normalize_report(raw, issue, target.os_type, fallback_note=notes, evidence=evidence)
+    hide_finding_ids(report)
     cause_id = str(raw.get("cause") or "").strip().upper()
     report["cause_id"] = cause_id.lower() if cause_id in ("NONE", "INVESTIGATION") else cause_id or None
     report["ai_cause"], report["ai_confidence"] = report["cause_id"], report["confidence"]
