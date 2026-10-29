@@ -135,6 +135,44 @@ laptop**. Code and unit tests are checked there; live checks run on the server, 
 - [~] Log rotation (3 x 10 MB per container) and port 8000 only on the server: applied by the next deploy
 - [~] Real-model evaluation (`evaluate --mode fast`) on the server
 
+## Phase 8: two devices at once, Live Troubleshooting, Endpoint Threat Detection
+
+Checked on the dev laptop (unit tests, a read-only scan of its real logs, the browser checks). Live checks on the Ubuntu
+server are done by the user after the push.
+
+### Push A: two devices at once, Live Troubleshooting
+
+- [x] At most 2 diagnoses at once across the server (`MAX_CONCURRENT_DIAGNOSES`); more wait in line as "queued"
+- [x] What's the issue? diagnoses up to 2 ticked devices, one session each, with a switcher between them
+- [x] Live Troubleshooting tab: every device being diagnosed, fixed or re-checked, what it is doing now, and the last hour
+- [ ] On the server: 2 devices plus a Performance analysis show 2 running and 1 "#1 in line"
+
+### Push B: Endpoint Threat Detection
+
+- [x] Agent `threat_scan` (toolkit 1.6.0, read-only): Kaspersky Endpoint Security, Kaspersky Network Agent, Defender, Windows
+  Security / System / PowerShell; Linux sshd, sudo, user changes, ClamAV; macOS sshd and sudo. Detections grouped by file
+- [x] An unreadable log says so (the Security log without admin rights read as "no events" before the probe)
+- [x] Seven categories, each finding with its proof, path, suggested action path and approvable actions
+- [x] Actions after approval only: rescan (report-only), quarantine (restorable 7 days), end the process, delete (file name typed);
+  the server sends a scan id and an item id, the agent takes the path from its own scan file
+- [x] Action chat: proposes an approval card, never runs anything; names and addresses hidden from a cloud AI
+- [x] Attack words matched in Python, never inside the PowerShell script: in it, they made Kaspersky block the AIops processes
+- [ ] On the server: Windows agents updated to 1.6.0 (re-run the install command; rebuild `DeviceHealthAgent.exe`)
+- [ ] On the server: Scan now on the laptop, Rescan, then Quarantine and Restore on an EICAR test file
+
+## Phase 9: Microsoft Removal tab (complete removal incl. registry, + install-blocker fix)
+
+Checked on the dev laptop (unit tests, a read-only listing of its real Microsoft products). The destructive paths
+are covered by mocked tests only; live removal on the server is the user's call.
+
+- [x] Agent `microsoft_products` (read-only): Office/365, Store (Appx) apps, other Microsoft programs, and whether a new install is blocked
+- [x] `remove_microsoft` (high): Office via Microsoft's scrubber (GetHelpCmd/SaRAcmd) when present, else Microsoft's documented manual cleanup (service, tasks, folders, registry); Store apps via Remove-AppxPackage -AllUsers + deprovision; other programs via their silent uninstaller
+- [x] Every registry key and folder removed is exported/moved to the Software-tab quarantine first (restore for 7 days); scrubber path backs up the registry (program files are reinstalled, not restored)
+- [x] `fix_install_blocker` (medium): clears the stale `Installer\InProgress` marker (backed up) and restarts the Windows Installer and Click-to-Run services (error 1618)
+- [x] New "Microsoft Removal" tab: list with filters, per-product Remove with an approval dialog naming the registry + backup, and the install-blocker banner with a Fix button
+- [x] Attack-safe: ids validated on the server; paths/keys/package names resolved on the device, never from the server; the AST guard lists the two new endpoints
+- [ ] On the server: list Microsoft products on a device; remove a harmless Microsoft program and restore it from Quarantine; (optional) drop Microsoft's GetHelpCmd.exe in the agent's tools folder for the scrubber path
+
 ### Push 3: learning hygiene
 
 - [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples

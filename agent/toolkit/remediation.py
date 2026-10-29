@@ -33,6 +33,9 @@ PROTECTED_PROCESSES = {
     "vmmem", "vmmemwsl", "vmcompute.exe", "com.docker.backend.exe", "docker desktop.exe", "dockerd", "containerd",
     "containerd-shim-runc-v2", "docker-proxy", "ollama", "ollama.exe", "ollama app.exe", "ollama_llama_server", "llama-server",
     "uvicorn", "nginx", "ngrok", "devicehealthagent", "devicehealthagent.exe",
+    # The antivirus itself: ending it would switch protection off, which is the opposite of a threat fix.
+    "avp.exe", "avpui.exe", "klnagent.exe", "kavfs.exe", "nissrv.exe", "mpdefendercoreservice.exe", "securityhealthservice.exe",
+    "kesl", "wdserver", "clamd", "freshclam",
 }
 
 STARTUP_BACKUP_KEY = r"Software\Sentinel\DisabledStartup"

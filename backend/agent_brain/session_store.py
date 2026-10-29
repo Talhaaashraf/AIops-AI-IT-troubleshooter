@@ -141,6 +141,35 @@ def list_sessions(device_id=None, limit=30):
         return sessions
 
 
+ACTIVE_STATUSES = ("queued", "running", "fixing", "verifying")
+_SUMMARY_COLUMNS = "session_id, device_id, device_label, os_type, issue, playbook_id, status, created_at, updated_at, error"
+
+
+def list_active_sessions():
+    """Sessions being diagnosed, fixed or re-checked right now (or waiting for a slot), oldest first."""
+    with _connect() as connection:
+        rows = connection.execute(
+            f"SELECT {_SUMMARY_COLUMNS} FROM troubleshoot_sessions WHERE status IN ({', '.join('?' * len(ACTIVE_STATUSES))}) ORDER BY created_at",
+            ACTIVE_STATUSES).fetchall()
+        return [dict(row) for row in rows]
+
+
+def list_recent_finished(minutes=60, limit=5):
+    """Sessions that finished in the last `minutes`, newest first."""
+    since = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - minutes * 60, timezone.utc).isoformat()
+    with _connect() as connection:
+        rows = connection.execute(
+            f"SELECT {_SUMMARY_COLUMNS}, report_json FROM troubleshoot_sessions WHERE status NOT IN ({', '.join('?' * len(ACTIVE_STATUSES))}) "
+            "AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?", (*ACTIVE_STATUSES, since, limit)).fetchall()
+        sessions = []
+        for row in rows:
+            session = dict(row)
+            report = _loads(session.pop("report_json")) or {}
+            session["root_cause"] = report.get("root_cause")
+            sessions.append(session)
+        return sessions
+
+
 INTERRUPTED_FIX_SUMMARY = ("Interrupted by a server restart before the device reported back. The fix may still have run: "
                            "its result is recorded if the device reports it later. Check the device before running it again.")
 

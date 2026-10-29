@@ -1447,7 +1447,8 @@ async function diagnoseDevice(deviceId) {
 // Onboarding health check (full check-up run when a device first connects)
 // ----------------------------------------------------------------------------
 
-const SESSION_FINISHED = new Set(['diagnosed', 'resolved', 'unresolved', 'not_resolved', 'failed', 'interrupted', 'fixing']);
+// The onboarding report is ready once diagnosed, also while a fix from it runs or is re-checked.
+const SESSION_FINISHED = new Set(['diagnosed', 'resolved', 'unresolved', 'not_resolved', 'failed', 'interrupted', 'fixing', 'verifying']);
 
 function renderOnboarding(deviceId, data) {
   const rerun = `<button class="ghost-button" type="button" data-onboarding-rerun="${escapeHtml(deviceId)}">Run full health check</button>`;
@@ -1832,6 +1833,219 @@ function openSoftware(deviceId) {
 }
 
 // ============================================================================
+// Microsoft Removal — list Microsoft products, remove one completely, fix a stuck installer
+// ============================================================================
+
+let msDeviceId = null;
+let msProducts = [];
+let msBlocker = null;
+let msScrubber = false;
+let msFilter = 'all';
+let msBusy = false;
+
+const MS_KIND_LABEL = { office: 'Office / 365', appx: 'Store app', program: 'Program' };
+
+function msSetStatus(text, tone = '') {
+  const element = $('ms-status');
+  element.textContent = text;
+  element.className = `sw-status${tone ? ` ${tone}` : ''}`;
+}
+
+function msSize(mb) {
+  const value = Number(mb);
+  if (!(value > 0)) return '--';
+  return value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${value} MB`;
+}
+
+async function loadMicrosoft(selectedId) {
+  msDeviceId = await fillDeviceSelect($('ms-device'), () => loadMicrosoft());
+  if (selectedId) {
+    $('ms-device').value = selectedId;
+    msDeviceId = selectedId;
+  }
+  msProducts = [];
+  renderMicrosoft();
+  msSetStatus('Click Scan now to list Microsoft products on this device (read-only, about 1-2 min).');
+}
+
+async function scanMicrosoft() {
+  if (!msDeviceId) return;
+  $('ms-scan').disabled = true;
+  msSetStatus('Starting the scan...');
+  try {
+    const job = await readJson(await fetch(`/api/microsoft/${encodeURIComponent(msDeviceId)}/scan`, { method: 'POST' }));
+    const device = msDeviceId;
+    const started = Date.now();
+    for (;;) {
+      await new Promise((resolve) => { setTimeout(resolve, 2000); });
+      if (msDeviceId !== device) return;
+      const state = await fetch(`/api/software/jobs/${encodeURIComponent(job.job_id)}`).then((response) => response.json()).catch(() => ({}));
+      if (state.state === 'running') {
+        msSetStatus(`Listing Microsoft products on ${job.device}... ${Math.round((Date.now() - started) / 1000)}s`);
+        continue;
+      }
+      if (state.state === 'done' && state.data) {
+        msProducts = state.data.products || [];
+        msBlocker = state.data.blocker || null;
+        msScrubber = !!state.data.scrubber_present;
+        renderMicrosoft();
+        msSetStatus(state.summary || `${msProducts.length} Microsoft product(s).`);
+      } else {
+        msSetStatus(state.summary || state.detail || 'Scan failed.', 'error');
+      }
+      break;
+    }
+  } catch (error) {
+    msSetStatus(friendlyError(error), 'error');
+  } finally {
+    $('ms-scan').disabled = false;
+  }
+}
+
+function renderMicrosoftBlocker() {
+  const box = $('ms-blocker');
+  if (!msBlocker) {
+    box.classList.add('hidden');
+    return;
+  }
+  const blocked = msBlocker.installer_in_progress || msBlocker.reboot_pending || msBlocker.msiexec_count > 1;
+  const bits = [];
+  if (msBlocker.installer_in_progress) bits.push('a stale "installation in progress" marker');
+  if (msBlocker.reboot_pending) bits.push('a pending restart');
+  if (msBlocker.msiexec_count > 1) bits.push(`${msBlocker.msiexec_count} installers running`);
+  box.classList.remove('hidden');
+  box.className = `ms-blocker ${blocked ? 'warn' : 'ok'}`;
+  box.innerHTML = blocked
+    ? `<div><strong>New installs may be blocked.</strong> Found: ${escapeHtml(bits.join(', '))}. This is often what stops Office or other apps from installing (error 1618).</div>`
+      + '<button class="ghost-button" type="button" id="ms-fix">Fix the install blocker</button>'
+    : '<div>No install blocker detected: new installs should work.</div>';
+}
+
+function msActionButtons(product) {
+  if (product.remove_kind === 'program' && !product.can_remove) {
+    return `<span class="soft-label" title="${escapeHtml(product.note || '')}">No silent uninstaller</span>`;
+  }
+  const label = product.remove_kind === 'office' ? 'Remove completely' : product.remove_kind === 'appx' ? 'Remove (all users)' : 'Remove';
+  return `<button class="ghost-button danger" type="button" data-ms-remove="${escapeHtml(product.id)}">${label}</button>`;
+}
+
+function renderMicrosoft() {
+  renderMicrosoftBlocker();
+  const search = ($('ms-search').value || '').toLowerCase();
+  const rows = msProducts.filter((product) => (msFilter === 'all' || product.remove_kind === msFilter)
+    && (!search || `${product.name} ${product.publisher || ''}`.toLowerCase().includes(search)));
+  const body = $('ms-body');
+  if (!msProducts.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-state">Pick a device and click Scan now.</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty-state">No products match this filter.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map((product) => `
+    <tr>
+      <td>
+        <strong>${escapeHtml(product.name)}</strong>
+        ${product.restorable ? '<span class="ms-tag">restorable 7 days</span>' : product.remove_kind === 'appx' ? '<span class="ms-tag">reinstall from Store</span>' : ''}
+        ${product.note ? `<small class="soft-label">${escapeHtml(product.note)}</small>` : ''}
+      </td>
+      <td>${escapeHtml(product.install_type || MS_KIND_LABEL[product.remove_kind] || '')}</td>
+      <td>${escapeHtml(product.version || '--')}</td>
+      <td>${escapeHtml(msSize(product.size_mb))}</td>
+      <td class="sw-actions">${msActionButtons(product)}</td>
+    </tr>`).join('');
+}
+
+function msConfirmText(product) {
+  if (product.remove_kind === 'office') {
+    return `Completely remove ${product.name} from this device?\n\n`
+      + `• Its program files, registry keys, Click-to-Run service and scheduled tasks are removed.\n`
+      + `• ${msScrubber ? "Microsoft's own scrubber is on the device and will be used." : "Microsoft's documented manual cleanup will be used (no scrubber found)."}\n`
+      + `• Registry keys and folders are backed up first — restore for 7 days from the Software tab's Quarantine.\n`
+      + `• Close all Office apps first. A restart finishes the cleanup.\n\nAIops only runs this because you approve it now; the approval is recorded.`;
+  }
+  if (product.remove_kind === 'appx') {
+    return `Remove the Store app ${product.name} for every user on this device?\n\nReinstall it from the Microsoft Store to get it back. This is recorded.`;
+  }
+  return `Uninstall ${product.name} from this device?\n\nIt runs the program's own silent uninstaller. This is recorded.`;
+}
+
+async function removeMicrosoft(id) {
+  const product = msProducts.find((item) => item.id === id);
+  if (!product || msBusy) return;
+  if (!window.confirm(msConfirmText(product))) return;
+  msBusy = true;
+  msSetStatus(`Removing ${product.name} on ${msDeviceId}... this can take several minutes.`);
+  try {
+    const job = await readJson(await fetch(`/api/microsoft/${encodeURIComponent(msDeviceId)}/remove`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name: product.name }),
+    }));
+    await pollMicrosoftJob(job, `${product.name} removed`);
+  } catch (error) {
+    msSetStatus(friendlyError(error), 'error');
+  } finally {
+    msBusy = false;
+  }
+}
+
+async function fixInstaller() {
+  if (msBusy) return;
+  if (!window.confirm('Fix the stuck installer on this device?\n\nIt clears the stale "installation in progress" marker (backed up first) and restarts the Windows Installer and Click-to-Run services. This is recorded.')) return;
+  msBusy = true;
+  msSetStatus('Fixing the install blocker...');
+  try {
+    const job = await readJson(await fetch(`/api/microsoft/${encodeURIComponent(msDeviceId)}/fix-installer`, { method: 'POST' }));
+    await pollMicrosoftJob(job, 'Install blocker checked');
+  } catch (error) {
+    msSetStatus(friendlyError(error), 'error');
+  } finally {
+    msBusy = false;
+  }
+}
+
+async function pollMicrosoftJob(job, doneLabel) {
+  const device = msDeviceId;
+  for (;;) {
+    await new Promise((resolve) => { setTimeout(resolve, 3000); });
+    const state = await fetch(`/api/software/jobs/${encodeURIComponent(job.job_id)}`).then((response) => response.json()).catch(() => ({}));
+    if (state.state === 'running') {
+      if (msDeviceId === device) msSetStatus(`${job.name} on ${job.device}: working... (this can take several minutes)`);
+      continue;
+    }
+    const ok = state.state === 'done';
+    toast(state.summary || state.detail || (ok ? doneLabel : 'Action failed'), ok ? 'ok' : 'error');
+    if (msDeviceId === device) {
+      msSetStatus(state.summary || doneLabel, ok ? '' : 'error');
+      scanMicrosoft();  // refresh the list and the blocker
+    }
+    break;
+  }
+}
+
+function wireMicrosoft() {
+  $('ms-scan').addEventListener('click', scanMicrosoft);
+  $('ms-search').addEventListener('input', renderMicrosoft);
+  $('ms-filter').addEventListener('click', (event) => {
+    const option = event.target.closest('[data-ms-filter]');
+    if (!option) return;
+    msFilter = option.dataset.msFilter;
+    document.querySelectorAll('#ms-filter [data-ms-filter]').forEach((item) => {
+      item.classList.toggle('active', item === option);
+      item.setAttribute('aria-checked', String(item === option));
+    });
+    renderMicrosoft();
+  });
+  $('ms-body').addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-ms-remove]');
+    if (remove) removeMicrosoft(remove.dataset.msRemove);
+  });
+  $('ms-blocker').addEventListener('click', (event) => {
+    if (event.target.closest('#ms-fix')) fixInstaller();
+  });
+}
+
+// ============================================================================
 // Add Agent — one-line enrollment
 // ============================================================================
 
@@ -2077,19 +2291,56 @@ async function loadTroubleshoot() {
   }
 }
 
+// Up to this many devices get a diagnosis from one Start (the server runs at most 2 diagnoses at once anyway).
+const TS_MAX_DEVICES = 2;
+// Sessions started together, for the switcher above the session view: [{session_id, device, status}].
+let tsStarted = [];
+
+function selectedTroubleshootDevices() {
+  return [...document.querySelectorAll('#ts-devices input:checked')].map((box) => box.value);
+}
+
+function updateTroubleshootDeviceLimit() {
+  const picked = selectedTroubleshootDevices().length;
+  document.querySelectorAll('#ts-devices input').forEach((box) => { box.disabled = picked >= TS_MAX_DEVICES && !box.checked; });
+  setText('ts-devices-hint', picked >= TS_MAX_DEVICES ? `${TS_MAX_DEVICES} devices picked (the most at once)` : `tick up to ${TS_MAX_DEVICES}: each gets its own diagnosis`);
+}
+
 async function loadTroubleshootTargets(selectedId) {
-  const select = $('ts-device');
-  const current = selectedId || select.value;
+  const list = $('ts-devices');
+  const current = selectedId ? [selectedId] : selectedTroubleshootDevices();
+  let targets;
   try {
     const data = await fetch('/api/troubleshoot/targets').then((response) => response.json());
-    select.innerHTML = (data.targets || []).sort((a, b) => targetRank(a) - targetRank(b)).map((target) => {
-      const offline = target.status !== 'online' ? ' - offline' : '';
-      return `<option value="${escapeHtml(target.device_id)}">${escapeHtml(target.label)} / ${escapeHtml(target.os_type)}${offline}</option>`;
-    }).join('') || NO_DEVICES_OPTION;
-    select.value = [...select.options].some((option) => option.value === current) ? current : (select.options[0]?.value ?? '');
+    targets = (data.targets || []).sort((a, b) => targetRank(a) - targetRank(b));
   } catch (_error) {
-    select.innerHTML = '<option value="local">This server</option>';
+    targets = [{ device_id: 'local', label: 'This server', os_type: '', status: 'online' }];
   }
+  if (!targets.length) {
+    list.innerHTML = '<p class="soft-label">No devices yet: add one under Add Agent.</p>';
+    return;
+  }
+  let picked = current.filter((id) => targets.some((target) => target.device_id === id)).slice(0, TS_MAX_DEVICES);
+  if (!picked.length) picked = [targets[0].device_id];
+  list.innerHTML = targets.map((target) => {
+    const offline = target.status !== 'online';
+    return `<label class="ts-device-option${offline ? ' offline' : ''}">
+      <input type="checkbox" value="${escapeHtml(target.device_id)}"${picked.includes(target.device_id) ? ' checked' : ''}>
+      <span>${escapeHtml(target.label)}</span><small>${escapeHtml(target.os_type)}${offline ? ' · offline' : ''}</small>
+    </label>`;
+  }).join('');
+  updateTroubleshootDeviceLimit();
+}
+
+function renderSessionSwitch() {
+  const bar = $('ts-session-switch');
+  const shown = tsStarted.length > 1 && tsStarted.some((item) => item.session_id === tsSessionId);
+  bar.classList.toggle('hidden', !shown);
+  if (!shown) return;
+  bar.innerHTML = tsStarted.map((item) => `
+    <button type="button" role="tab" class="ts-switch-chip${item.session_id === tsSessionId ? ' active' : ''}" aria-selected="${item.session_id === tsSessionId}" data-ts-switch="${escapeHtml(item.session_id)}">
+      <span class="status-dot ${STATUS_TONES[item.status] || 'unknown'}"></span>${escapeHtml(item.device)}<small>${escapeHtml(STATUS_LABELS[item.status] || item.status || '')}</small>
+    </button>`).join('');
 }
 
 async function loadTroubleshootHistory() {
@@ -2126,6 +2377,11 @@ async function startTroubleshoot() {
     setText('ts-form-status', 'Describe the issue or pick a common problem first.');
     return;
   }
+  const deviceIds = selectedTroubleshootDevices();
+  if (!deviceIds.length) {
+    setText('ts-form-status', 'Tick at least one device.');
+    return;
+  }
   const button = $('ts-start');
   button.disabled = true;
   setText('ts-form-status', tsMode === 'instant' ? 'Running instant checks...' : 'Starting the AI agent...');
@@ -2133,15 +2389,16 @@ async function startTroubleshoot() {
     const response = await fetch('/api/troubleshoot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issue, device_id: $('ts-device').value, playbook_id: tsPlaybookId, mode: tsMode }),
+      body: JSON.stringify({ issue, device_ids: deviceIds, playbook_id: tsPlaybookId, mode: tsMode }),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || 'Could not start troubleshooting');
-    setText('ts-form-status', '');
-    openTroubleshootSession(data.session_id);
+    const data = await readJson(response);
+    tsStarted = (data.sessions || [data]).map((item) => ({ session_id: item.session_id, device: item.device, status: item.status }));
+    setText('ts-form-status', tsStarted.length > 1 ? `Started on ${tsStarted.length} devices: switch between them above the report, or follow both in Live Troubleshooting.` : '');
+    openTroubleshootSession(tsStarted[0].session_id);
     loadTroubleshootHistory();
+    refreshLiveBadge();
   } catch (error) {
-    setText('ts-form-status', error.message);
+    setText('ts-form-status', friendlyError(error));
   } finally {
     button.disabled = false;
   }
@@ -2158,6 +2415,13 @@ function openTroubleshootSession(sessionId) {
   $('ts-session').classList.remove('hidden');
   $('ts-steps').innerHTML = '';
   $('ts-report').innerHTML = '<p class="soft-label">Loading session...</p>';
+  // Until its first snapshot arrives, show nothing of the session that was open before.
+  const pill = $('ts-session-status');
+  pill.className = 'status-pill unknown';
+  pill.textContent = 'Loading';
+  setText('ts-session-device', 'SESSION');
+  setText('ts-session-issue', '--');
+  renderSessionSwitch();
   connectTroubleshootStream(sessionId);
   $('ts-session').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -2330,6 +2594,11 @@ function renderTroubleshootSession(session) {
   const pill = $('ts-session-status');
   pill.className = `status-pill ${STATUS_TONES[session.status] || 'unknown'}`;
   pill.textContent = STATUS_LABELS[session.status] || session.status;
+  const started = tsStarted.find((item) => item.session_id === session.session_id);
+  if (started && started.status !== session.status) {
+    started.status = session.status;
+    renderSessionSwitch();
+  }
 
   const steps = session.steps || [];
   // Steps that already finished are no longer pending (covers events missed while reconnecting).
@@ -2507,6 +2776,484 @@ function troubleshootDevice(deviceId) {
 }
 
 // ============================================================================
+// Live Troubleshooting: every device being diagnosed, fixed or re-checked now
+// ============================================================================
+
+let liveTimer = null;
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(seconds || 0));
+  if (value < 60) return `${value}s`;
+  const minutes = Math.floor(value / 60);
+  if (minutes < 60) return `${minutes}m ${String(value % 60).padStart(2, '0')}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+function liveCard(session) {
+  const waiting = session.waiting;
+  const phase = waiting
+    ? `#${session.queue_position} in line: starts when a diagnosis slot frees up`
+    : session.phase || (session.status === 'queued' ? 'Starting...' : 'Working...');
+  const phaseTime = !waiting && session.phase_seconds != null ? ` · ${formatDuration(session.phase_seconds)}` : '';
+  return `
+    <article class="live-card${waiting ? ' waiting' : ''}">
+      <header>
+        <span class="status-pill ${waiting ? 'unknown' : STATUS_TONES[session.status] || 'unknown'}">${escapeHtml(waiting ? 'Waiting in line' : STATUS_LABELS[session.status] || session.status)}</span>
+        <span class="live-source">${escapeHtml(session.source)}</span>
+      </header>
+      <h3>${escapeHtml(session.device_label || session.device_id)}</h3>
+      <small class="soft-label">${escapeHtml(session.os_type || '')}</small>
+      <p class="live-issue">${escapeHtml(session.issue)}</p>
+      <p class="live-phase">${waiting ? '' : '<span class="spinner"></span>'}${escapeHtml(phase)}${escapeHtml(phaseTime)}</p>
+      <footer>
+        <span class="soft-label">Started ${escapeHtml(formatDuration(session.elapsed_seconds))} ago</span>
+        <button class="ghost-button" type="button" data-live-open="${escapeHtml(session.session_id)}">Open</button>
+      </footer>
+    </article>`;
+}
+
+function renderLive(data) {
+  const limit = data.limit || 2;
+  setText('live-limit', String(limit));
+  setText('live-slots-text', `${data.in_use} of ${limit} in use`);
+  $('live-slot-bar').innerHTML = Array.from({ length: limit }, (_, index) => `<span class="${index < data.in_use ? 'busy' : ''}"></span>`).join('');
+  $('live-sessions').innerHTML = data.sessions.length
+    ? data.sessions.map(liveCard).join('')
+    : '<p class="soft-label">No device is being troubleshot right now. Start one from What\'s the issue?, or it starts on its own when a new device connects (onboarding check).</p>';
+  $('live-recent').innerHTML = (data.recent || []).map((session) => `
+    <button class="ts-history-item" data-live-open="${escapeHtml(session.session_id)}">
+      <span class="status-pill ${STATUS_TONES[session.status] || 'unknown'}">${escapeHtml(STATUS_LABELS[session.status] || session.status)}</span>
+      <strong>${escapeHtml(session.issue)}</strong>
+      <small>${escapeHtml(session.device_label || session.device_id)} / ${escapeHtml(session.source)} / ${new Date(session.updated_at).toLocaleTimeString()}${session.root_cause ? ` / ${escapeHtml(session.root_cause.slice(0, 120))}` : ''}</small>
+    </button>`).join('') || '<p class="soft-label">Nothing finished in the last hour.</p>';
+}
+
+function updateLiveBadge(data) {
+  const count = data.sessions.length;
+  const badge = $('live-count');
+  badge.textContent = count ? String(count) : '';
+  badge.title = count ? `${count} device${count === 1 ? '' : 's'} being troubleshot now` : '';
+  // Keep the switcher's status dots current for sessions that are not being viewed.
+  let changed = false;
+  tsStarted.forEach((item) => {
+    const active = data.sessions.find((session) => session.session_id === item.session_id);
+    const finished = (data.recent || []).find((session) => session.session_id === item.session_id);
+    const status = active ? (active.waiting ? 'queued' : active.status) : finished?.status;
+    if (status && status !== item.status) {
+      item.status = status;
+      changed = true;
+    }
+  });
+  if (changed) renderSessionSwitch();
+}
+
+async function fetchLive() {
+  return readJson(await fetch('/api/troubleshoot/active'));
+}
+
+async function loadLive() {
+  clearTimeout(liveTimer);
+  try {
+    const data = await fetchLive();
+    renderLive(data);
+    updateLiveBadge(data);
+  } catch (error) {
+    $('live-sessions').innerHTML = `<p class="soft-label">${escapeHtml(friendlyError(error))}</p>`;
+  }
+  if ($('live').classList.contains('active-tab')) liveTimer = setTimeout(loadLive, 3000);
+}
+
+async function refreshLiveBadge() {
+  if ($('live').classList.contains('active-tab')) return;  // loadLive keeps it current
+  try {
+    updateLiveBadge(await fetchLive());
+  } catch (_error) {
+    // The health poll shows connection problems; the badge just keeps its last value.
+  }
+}
+
+function openLiveSession(sessionId) {
+  switchTab('troubleshoot');
+  openTroubleshootSession(sessionId);
+}
+
+// ============================================================================
+// Threat Detection: categorised findings with proof, path, an action path, and an action chat
+// ============================================================================
+
+let threatDeviceId = null;
+let threatData = null;
+let threatFilter = null;
+let threatPollTimer = null;
+let threatPendingCard = null;
+const threatProposals = [];
+const THREAT_CHAT_HELLO = 'Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "T1 ko rescan karo". I show an approval card: nothing runs until you approve it.';
+const THREAT_STATUS = { active: 'Open', neutralised: 'Removed', acknowledged: 'Acknowledged', false_positive: 'False positive' };
+const THREAT_STATUS_TONE = { active: 'critical', neutralised: 'ok', acknowledged: 'unknown', false_positive: 'unknown' };
+const THREAT_ACTION_TEXT = {
+  rescan: (card) => `Scan ${card.path} again with the antivirus, report-only: nothing is changed.`,
+  quarantine: (card) => `Move ${card.path} into the AIops quarantine. It is renamed so it cannot start, and can be restored for 7 days (Quarantined threats, or the Software tab).`,
+  kill: (card) => `End ${card.label.replace(/^End /, '')}. Unsaved work in that program is lost.`,
+  delete: (card) => `Delete ${card.path} permanently. It cannot be restored.`,
+};
+
+function threatPath(suffix = '') {
+  return `/api/threats/${encodeURIComponent(threatDeviceId)}${suffix}`;
+}
+
+async function loadThreats() {
+  threatDeviceId = await fillDeviceSelect($('threat-device'), () => {
+    threatDeviceId = $('threat-device').value;
+    threatFilter = null;
+    threatProposals.length = 0;
+    $('threat-chat-messages').innerHTML = '';
+    addThreatChat('assistant', THREAT_CHAT_HELLO);
+    $('threat-explanation').classList.add('hidden');
+    $('threat-quarantine-list').innerHTML = '';
+    refreshThreats();
+  });
+  refreshThreats();
+}
+
+async function refreshThreats() {
+  clearTimeout(threatPollTimer);
+  const deviceId = threatDeviceId;
+  if (!deviceId) return;
+  try {
+    const data = await readJson(await fetch(threatPath()));
+    if (deviceId !== threatDeviceId) return;
+    threatData = data;
+    renderThreats();
+    if (data.jobs.some((job) => job.action === 'threat-scan') && $('threats').classList.contains('active-tab')) threatPollTimer = setTimeout(refreshThreats, 3000);
+  } catch (error) {
+    $('threat-status').textContent = friendlyError(error);
+    $('threat-findings').innerHTML = '';
+  }
+  refreshThreatBadge();
+}
+
+async function refreshThreatBadge() {
+  try {
+    const data = await readJson(await fetch('/api/threats'));
+    const serious = data.devices.filter((device) => ['critical', 'high'].includes(device.worst)).length;
+    const badge = $('threat-count');
+    badge.textContent = serious ? String(serious) : '';
+    badge.title = serious ? `${serious} device${serious === 1 ? '' : 's'} with high or critical threat findings` : '';
+  } catch (_error) {
+    // The badge keeps its last value; the tab shows the error.
+  }
+}
+
+function renderThreats() {
+  const data = threatData;
+  const scan = data.scan;
+  const scanning = data.jobs.find((job) => job.action === 'threat-scan');
+  $('threat-scan').disabled = Boolean(scanning);
+  const auto = data.scan_minutes ? `Scans on its own every ${data.scan_minutes} min.` : 'Automatic scans are off (THREAT_SCAN_MINUTES=0).';
+  if (scanning) $('threat-status').innerHTML = `<span class="spinner"></span>Scanning ${escapeHtml(data.device)}: reading the antivirus and the security logs (under a minute)...`;
+  else if (!scan) $('threat-status').textContent = `${data.device} has not been scanned yet: click Scan now. ${auto}`;
+  else {
+    $('threat-status').innerHTML = `Last scan of <strong>${escapeHtml(data.device)}</strong> ${escapeHtml(new Date(scan.scanned_at).toLocaleString())}, covering the last ${escapeHtml(scan.hours)} h. ${escapeHtml(auto)}`
+      + (data.stale ? ' <strong>This scan is over 6 hours old: scan again before approving an action.</strong>' : '')
+      + (scan.truncated ? ' Only the most urgent findings were kept (too many to send).' : '');
+  }
+  $('threat-sources').innerHTML = (scan?.sources || []).map((source) => {
+    const missing = !source.available && source.detail === 'not on this device';
+    const tone = source.available ? 'ok' : missing ? 'missing' : 'off';
+    const mark = source.available ? '✓' : missing ? '–' : '✗';
+    return `<span class="threat-source ${tone}" title="${escapeHtml(source.detail || `${source.count} event(s) read`)}">${mark} ${escapeHtml(source.name)}${source.available ? ` <small>${escapeHtml(source.count)}</small>` : ` <small>${escapeHtml(missing ? 'not installed' : source.detail)}</small>`}</span>`;
+  }).join('');
+  const categories = scan?.categories || [];
+  const total = categories.reduce((sum, item) => sum + item.open, 0);
+  $('threat-categories').innerHTML = scan ? [`<button type="button" class="threat-category${threatFilter ? '' : ' active'}" data-threat-filter=""><strong>${total}</strong><span>All open</span></button>`]
+    .concat(categories.map((item) => `<button type="button" class="threat-category${threatFilter === item.id ? ' active' : ''}${item.open ? ` sev-${escapeHtml(item.severity)}` : ''}" data-threat-filter="${escapeHtml(item.id)}" title="${escapeHtml(item.description)}">
+      <strong>${item.open}</strong><span>${escapeHtml(item.title)}</span>${item.count > item.open ? `<small>${item.count - item.open} closed</small>` : ''}</button>`)).join('') : '';
+  const findings = (scan?.findings || []).filter((finding) => !threatFilter || finding.category === threatFilter);
+  setText('threat-filter-title', threatFilter ? (categories.find((item) => item.id === threatFilter)?.title || 'Findings') : 'All categories');
+  if (!scan) {
+    $('threat-findings').innerHTML = '<p class="soft-label">No scan yet.</p>';
+    return;
+  }
+  if (!findings.length) {
+    $('threat-findings').innerHTML = `<p class="soft-label">${threatFilter ? 'Nothing in this category.' : 'Nothing suspicious found in this scan.'}${scan.unreadable.length ? ` Some logs could not be read: ${escapeHtml(scan.unreadable.map((source) => source.name).join(', '))}.` : ''}</p>`;
+    return;
+  }
+  let category = null;
+  $('threat-findings').innerHTML = findings.map((finding) => {
+    const heading = !threatFilter && finding.category !== category
+      ? `<h3 class="threat-group">${escapeHtml(categories.find((item) => item.id === finding.category)?.title || finding.category)}</h3>` : '';
+    category = finding.category;
+    return heading + renderThreatFinding(finding);
+  }).join('');
+}
+
+function threatActionButton(finding, action) {
+  return `<button type="button" class="ghost-button threat-action risk-${escapeHtml(action.risk)}" data-threat-action="${escapeHtml(action.action)}" data-finding="${escapeHtml(finding.id)}" data-pid="${escapeHtml(action.pid ?? '')}">${escapeHtml(action.label)}</button>`;
+}
+
+function renderThreatFinding(finding) {
+  const actionFor = (step) => finding.actions.find((action) => action.action === step.action && (step.action !== 'kill' || action.pid === step.pid));
+  const seen = finding.first_seen ? ` · first ${new Date(finding.first_seen).toLocaleString()}${finding.last_seen && finding.last_seen !== finding.first_seen ? `, last ${new Date(finding.last_seen).toLocaleString()}` : ''}` : '';
+  const proof = finding.proof.map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${escapeHtml(item.value)}</dd></div>`).join('')
+    + `<div><dt>Source</dt><dd>${escapeHtml(finding.source)}${finding.event_ids.length ? ` · event ${escapeHtml(finding.event_ids.join(', '))}` : ''}</dd></div>`
+    + `<div><dt>Seen</dt><dd>${escapeHtml(finding.count)}×${escapeHtml(seen)}</dd></div>`;
+  const objects = finding.objects.length ? `<details><summary>${escapeHtml(finding.count)} detection(s) in this file: first ${finding.objects.length}</summary><ul>${finding.objects.map((item) => `<li><code>${escapeHtml(item)}</code></li>`).join('')}</ul></details>` : '';
+  const threats = finding.threats.length > 1 ? `<p class="soft-label">Threat names: ${finding.threats.map((item) => `${escapeHtml(item.name)} (${escapeHtml(item.count)})`).join(', ')}</p>` : '';
+  const path = finding.path ? `<div><h4>Path</h4><div class="threat-path"><code>${escapeHtml(finding.path)}</code><button type="button" class="ghost-button" data-copy-path="${escapeHtml(finding.path)}">Copy</button></div>${objects}${threats}</div>` : '';
+  const steps = finding.steps.map((step) => {
+    const action = step.action ? actionFor(step) : null;
+    return `<li><span>${escapeHtml(step.text)}</span>${action ? threatActionButton(finding, action) : ''}</li>`;
+  }).join('');
+  const links = finding.lookups.length ? `<p class="threat-links">Look up the hash: ${finding.lookups.map((link) => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join(' · ')}</p>` : '';
+  const marked = finding.status === 'acknowledged' || finding.status === 'false_positive';
+  const marks = marked
+    ? `<button type="button" class="ghost-button" data-threat-mark="" data-finding="${escapeHtml(finding.id)}">Reopen</button>${finding.mark_note ? `<span class="soft-label">Note: ${escapeHtml(finding.mark_note)}</span>` : ''}`
+    : finding.status === 'active' ? `<button type="button" class="ghost-button" data-threat-mark="acknowledged" data-finding="${escapeHtml(finding.id)}">Acknowledge</button>
+      <button type="button" class="ghost-button" data-threat-mark="false_positive" data-finding="${escapeHtml(finding.id)}">False positive</button>` : '';
+  return `
+    <article class="threat-card sev-${escapeHtml(finding.severity)}${finding.status === 'active' ? '' : ' closed'}" id="threat-${escapeHtml(finding.id)}">
+      <header>
+        <span class="threat-id">${escapeHtml(finding.id)}</span>
+        <span class="severity severity-${escapeHtml(finding.severity === 'info' ? 'low' : finding.severity)}">${escapeHtml(finding.severity)}</span>
+        <span class="status-pill ${THREAT_STATUS_TONE[finding.status] || 'unknown'}">${escapeHtml(THREAT_STATUS[finding.status] || finding.status)}</span>
+        <h3>${escapeHtml(finding.title)}</h3>
+      </header>
+      <p>${escapeHtml(finding.summary)}</p>
+      <div class="threat-grid">
+        <div><h4>Proof</h4><dl class="threat-proof">${proof}</dl></div>
+        ${path}
+      </div>
+      <h4>Suggested action path</h4>
+      <ol class="threat-steps">${steps}</ol>
+      ${links}
+      <p class="threat-result hidden" id="threat-result-${escapeHtml(finding.id)}"></p>
+      <footer class="button-row">${marks}</footer>
+    </article>`;
+}
+
+async function startThreatScan() {
+  if (!threatDeviceId) return;
+  $('threat-scan').disabled = true;
+  try {
+    await readJson(await fetch(threatPath('/scan'), { method: 'POST' }));
+    refreshThreats();
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+    $('threat-scan').disabled = false;
+  }
+}
+
+function threatCard(findingId, actionName, pid) {
+  const finding = threatData?.scan?.findings.find((item) => item.id === findingId);
+  const action = finding?.actions.find((item) => item.action === actionName && (actionName !== 'kill' || String(item.pid) === String(pid)));
+  return finding && action ? { finding_id: finding.id, action: action.action, label: action.label, risk: action.risk, pid: action.pid ?? null, confirm: action.confirm ?? null, title: finding.title, path: finding.path } : null;
+}
+
+function openThreatApproval(card, fromChat = false) {
+  threatPendingCard = { ...card, fromChat };
+  setText('threat-dialog-kicker', `Approve on ${threatData.device} · ${card.finding_id} · ${card.risk} risk`);
+  setText('threat-dialog-title', `${card.label}: ${card.title}`);
+  setText('threat-dialog-text', (THREAT_ACTION_TEXT[card.action] || (() => card.label))(card));
+  setText('threat-dialog-path', card.path || '');
+  const deleting = card.action === 'delete';
+  $('threat-dialog-confirm-wrap').classList.toggle('hidden', !deleting);
+  setText('threat-dialog-name', card.confirm || '');
+  $('threat-dialog-confirm').value = '';
+  $('threat-dialog-ok').disabled = deleting;
+  $('threat-dialog-ok').textContent = deleting ? 'Delete permanently' : 'Approve & run';
+  $('threat-dialog').showModal();
+}
+
+function threatResult(findingId, text, ok) {
+  const line = $(`threat-result-${findingId}`);
+  if (line) {
+    line.textContent = text;
+    line.className = `threat-result ${ok ? 'ok' : 'failed'}`;
+  }
+}
+
+async function runThreatAction(card) {
+  const body = { finding_id: card.finding_id, action: card.action, pid: card.pid, confirm: card.action === 'delete' ? $('threat-dialog-confirm').value : undefined };
+  try {
+    const job = await readJson(await fetch(threatPath('/actions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
+    threatResult(card.finding_id, `${card.label} is running on the device...`, true);
+    if (card.fromChat) addThreatChat('assistant', `${card.label} on ${card.finding_id} approved: running it on the device...`);
+    const finished = await waitForSoftwareJob(job.job_id);
+    const ok = finished.state === 'done';
+    threatResult(card.finding_id, finished.summary || (ok ? 'Done.' : 'Failed.'), ok);
+    if (card.fromChat) addThreatChat('assistant', finished.summary || (ok ? 'Done.' : 'It failed.'));
+    toast(finished.summary || `${card.label} finished`, ok ? 'ok' : 'error');
+    // The file is gone or the program ended: scan again so the finding shows what is true now.
+    if (ok && card.action !== 'rescan') startThreatScan();
+  } catch (error) {
+    threatResult(card.finding_id, friendlyError(error), false);
+    if (card.fromChat) addThreatChat('assistant', friendlyError(error));
+  }
+}
+
+async function waitForSoftwareJob(jobId) {
+  for (;;) {
+    const job = await readJson(await fetch(`/api/software/jobs/${encodeURIComponent(jobId)}`));
+    if (job.state !== 'running') return job;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
+async function markThreat(findingId, status) {
+  let note = null;
+  if (status === 'false_positive') {
+    note = prompt('Why is it a false positive? (optional, kept with the finding)', '');
+    if (note === null) return;
+  }
+  try {
+    await readJson(await fetch(threatPath('/marks'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ finding_id: findingId, status: status || null, note }) }));
+    refreshThreats();
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  }
+}
+
+async function explainThreats() {
+  const box = $('threat-explanation');
+  box.classList.remove('hidden');
+  box.innerHTML = '<p class="soft-label"><span class="spinner"></span>Reading the findings (about a minute on a laptop CPU)...</p>';
+  try {
+    const data = await readJson(await fetch(threatPath('/explain'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+    box.innerHTML = `<p class="kicker">${data.source === 'ai' ? 'AI analysis' : 'Rules summary (AI off)'}${data.note ? ` · ${escapeHtml(data.note)}` : ''}</p>
+      <p>${escapeHtml(data.summary)}</p>
+      ${data.priorities.length ? `<ol>${data.priorities.map((item) => `<li><a href="#threat-${escapeHtml(item.finding_id)}" data-threat-jump="${escapeHtml(item.finding_id)}">${escapeHtml(item.finding_id)}</a>: ${escapeHtml(item.why)}</li>`).join('')}</ol>` : ''}
+      ${data.next_steps.length ? `<p class="kicker">Next steps</p><ul>${data.next_steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ul>` : ''}`;
+  } catch (error) {
+    box.innerHTML = `<p class="soft-label">${escapeHtml(friendlyError(error))}</p>`;
+  }
+}
+
+function addThreatChat(role, text, card) {
+  const message = document.createElement('div');
+  message.className = `chat-message ${role}`;
+  message.innerHTML = `<p>${escapeHtml(text)}</p>`;
+  if (card) {
+    threatProposals.push(card);
+    const index = threatProposals.length - 1;
+    message.innerHTML += `<div class="threat-proposal risk-${escapeHtml(card.risk)}">
+      <strong>${escapeHtml(card.label)}</strong> on ${escapeHtml(card.finding_id)}: ${escapeHtml(card.title)}
+      ${card.path ? `<code>${escapeHtml(card.path)}</code>` : ''}
+      <div class="button-row"><button type="button" class="primary-button" data-proposal-approve="${index}">Approve &amp; run</button><button type="button" class="ghost-button" data-proposal-cancel="${index}">Cancel</button></div>
+    </div>`;
+  }
+  $('threat-chat-messages').appendChild(message);
+  message.scrollIntoView({ block: 'nearest' });
+}
+
+async function sendThreatChat(event) {
+  event.preventDefault();
+  const input = $('threat-chat-input');
+  const text = input.value.trim();
+  if (!text || !threatDeviceId) return;
+  input.value = '';
+  addThreatChat('user', text);
+  const thinking = document.createElement('div');
+  thinking.className = 'chat-message assistant';
+  thinking.innerHTML = '<span class="spinner"></span>Thinking...';
+  $('threat-chat-messages').appendChild(thinking);
+  try {
+    const data = await readJson(await fetch(threatPath('/chat'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, session_id: 'dashboard' }) }));
+    thinking.remove();
+    addThreatChat('assistant', data.reply, data.proposal);
+  } catch (error) {
+    thinking.remove();
+    addThreatChat('assistant', friendlyError(error));
+  }
+}
+
+async function loadThreatQuarantine() {
+  const list = $('threat-quarantine-list');
+  list.innerHTML = '<p class="soft-label"><span class="spinner"></span>Asking the device...</p>';
+  try {
+    const job = await readJson(await fetch(`/api/agents/${encodeURIComponent(threatDeviceId)}/software/quarantine-list`, { method: 'POST' }));
+    const finished = await waitForSoftwareJob(job.job_id);
+    const batches = (finished.data?.batches || []).filter((batch) => String(batch.program || '').startsWith('Threat:'));
+    list.innerHTML = batches.length ? batches.map((batch) => `
+      <div class="threat-quarantine-item">
+        <div><strong>${escapeHtml(batch.program.replace(/^Threat:\s*/, ''))}</strong><small>${escapeHtml((batch.paths || []).join(', '))}</small><small>Restorable until ${escapeHtml(new Date(batch.expires).toLocaleDateString())}</small></div>
+        <button type="button" class="ghost-button" data-threat-restore="${escapeHtml(batch.batch_id)}" data-name="${escapeHtml(batch.program)}">Restore</button>
+      </div>`).join('') : `<p class="soft-label">${escapeHtml(finished.state === 'done' ? 'Nothing quarantined from this tab.' : finished.summary || 'Could not list the quarantine.')}</p>`;
+  } catch (error) {
+    list.innerHTML = `<p class="soft-label">${escapeHtml(friendlyError(error))}</p>`;
+  }
+}
+
+async function restoreThreat(batchId, name) {
+  if (!confirm(`Put "${name}" back where it was on ${threatData.device}?\n\nThe file was flagged by the antivirus: restore it only if you are sure it is safe.`)) return;
+  try {
+    const job = await readJson(await fetch(`/api/agents/${encodeURIComponent(threatDeviceId)}/software/restore`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch_id: batchId, name }) }));
+    const finished = await waitForSoftwareJob(job.job_id);
+    toast(finished.summary || 'Restored', finished.state === 'done' ? 'ok' : 'error');
+    loadThreatQuarantine();
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  }
+}
+
+function wireThreats() {
+  $('threat-scan').addEventListener('click', startThreatScan);
+  $('threat-explain').addEventListener('click', explainThreats);
+  $('threat-chat-form').addEventListener('submit', sendThreatChat);
+  $('threat-quarantine-load').addEventListener('click', () => { if (threatDeviceId) loadThreatQuarantine(); });
+  $('threat-quarantine-list').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-threat-restore]');
+    if (button) restoreThreat(button.dataset.threatRestore, button.dataset.name);
+  });
+  $('threat-categories').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-threat-filter]');
+    if (!button) return;
+    threatFilter = button.dataset.threatFilter || null;
+    renderThreats();
+  });
+  $('threat-findings').addEventListener('click', (event) => {
+    const action = event.target.closest('[data-threat-action]');
+    if (action) {
+      const card = threatCard(action.dataset.finding, action.dataset.threatAction, action.dataset.pid);
+      if (card) openThreatApproval(card);
+    }
+    const mark = event.target.closest('[data-threat-mark]');
+    if (mark) markThreat(mark.dataset.finding, mark.dataset.threatMark);
+    const copy = event.target.closest('[data-copy-path]');
+    if (copy) navigator.clipboard.writeText(copy.dataset.copyPath).then(() => toast('Path copied'), () => toast('Copy failed: select the path by hand', 'error'));
+  });
+  $('threat-explanation').addEventListener('click', (event) => {
+    const jump = event.target.closest('[data-threat-jump]');
+    if (!jump) return;
+    event.preventDefault();
+    $(`threat-${jump.dataset.threatJump}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $('threat-chat-messages').addEventListener('click', (event) => {
+    const approve = event.target.closest('[data-proposal-approve]');
+    const cancel = event.target.closest('[data-proposal-cancel]');
+    const button = approve || cancel;
+    if (!button) return;
+    button.closest('.threat-proposal').querySelectorAll('button').forEach((item) => { item.disabled = true; });
+    if (cancel) {
+      addThreatChat('assistant', 'Cancelled: nothing was run.');
+      return;
+    }
+    const card = threatProposals[Number(approve.dataset.proposalApprove)];
+    if (card) openThreatApproval(card, true);
+  });
+  $('threat-dialog-confirm').addEventListener('input', () => {
+    const wanted = String(threatPendingCard?.confirm || '').toLowerCase();
+    $('threat-dialog-ok').disabled = $('threat-dialog-confirm').value.trim().toLowerCase() !== wanted;
+  });
+  $('threat-dialog').addEventListener('close', () => {
+    const card = threatPendingCard;
+    threatPendingCard = null;
+    if (!card) return;
+    if ($('threat-dialog').returnValue === 'ok') runThreatAction(card);
+    else if (card.fromChat) addThreatChat('assistant', 'Cancelled: nothing was run.');
+  });
+}
+
+// ============================================================================
 // Decisions (audit trail of the AI and of human approvals)
 // ============================================================================
 
@@ -2514,7 +3261,7 @@ const DECISION_LABELS = {
   diagnosis: 'Diagnosis', fix_approved: 'Fix approved', fix_rejected: 'Solution rejected', fix_done_manually: 'Done by hand',
   fix_result: 'Fix result', health_analysis: 'Health analysis', log_analysis: 'Log analysis', chat_answer: 'Chat answer',
   software_action: 'Software action', performance_analysis: 'Performance analysis', model_switch: 'Model switch',
-  leftover_review: 'Leftover review',
+  leftover_review: 'Leftover review', threat_analysis: 'Threat analysis', threat_chat: 'Threat chat', threat_mark: 'Threat mark',
 };
 
 // Who a decision belongs to when no approver is recorded: rejections are people, results are re-checks.
@@ -2545,6 +3292,9 @@ async function loadDecisions() {
 
 const TAB_LOADERS = {
   troubleshoot: loadTroubleshoot,
+  live: loadLive,
+  threats: loadThreats,
+  microsoft: loadMicrosoft,
   learning: loadLearning,
   'add-agent': loadAddAgent,
   alerts: loadAlerts,
@@ -2581,6 +3331,8 @@ function wireEvents() {
   });
 
   $('refresh-security').addEventListener('click', loadSecurity);
+  wireThreats();
+  wireMicrosoft();
   $('perf-run').addEventListener('click', runPerformanceTest);
   $('perf-ai').addEventListener('click', (event) => {
     if (event.target.closest('[data-perf-analyse]')) analysePerformance();
@@ -2618,6 +3370,15 @@ function wireEvents() {
     const item = event.target.closest('[data-session]');
     if (item) openTroubleshootSession(item.dataset.session);
   });
+  $('ts-devices').addEventListener('change', updateTroubleshootDeviceLimit);
+  $('ts-session-switch').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-ts-switch]');
+    if (chip && chip.dataset.tsSwitch !== tsSessionId) openTroubleshootSession(chip.dataset.tsSwitch);
+  });
+  ['live-sessions', 'live-recent'].forEach((id) => $(id).addEventListener('click', (event) => {
+    const item = event.target.closest('[data-live-open]');
+    if (item) openLiveSession(item.dataset.liveOpen);
+  }));
   $('ts-report').addEventListener('click', (event) => {
     const button = event.target.closest('[data-apply-fix]');
     if (button) applyTroubleshootFix(Number(button.dataset.applyFix));
@@ -2716,6 +3477,10 @@ loadHealth();
 loadAlerts();
 checkAI();
 loadLearning();
+refreshLiveBadge();
+refreshThreatBadge();
 setInterval(loadHealth, 5000);
+setInterval(refreshThreatBadge, 60000);
+setInterval(refreshLiveBadge, 10000);
 setInterval(checkAI, 30000);
 if (location.hash && $(location.hash.slice(1))?.classList.contains('tab')) switchTab(location.hash.slice(1));

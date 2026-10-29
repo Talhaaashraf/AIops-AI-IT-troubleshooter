@@ -154,6 +154,20 @@ def _security_posture(data, summary, args, os_type):
     return found
 
 
+def _threat_scan(data, summary, args, os_type):
+    """Open threat findings of medium severity or more (the Threat Detection tab has the details and the actions)."""
+    from ..threat_rules import analyze_threats
+
+    if not isinstance(data, dict):
+        return []
+    found = []
+    for finding in analyze_threats(data, os_type)["findings"]:
+        if finding["status"] == "active" and finding["severity"] in ("medium", "high", "critical"):
+            detail = finding["summary"] + (f" File: {finding['path']}." if finding.get("path") else "") + " Approve actions on it in the Threat Detection tab."
+            found.append(_finding(f"threat_{finding['kind']}:{finding['dedup_key'][-60:]}", finding["severity"], finding["title"], detail[:400], "threat_scan"))
+    return found[:6]
+
+
 def _event_log_errors(data, summary, args, os_type):
     found = []
     critical = re.match(r"(\d+) critical", summary or "")
@@ -345,6 +359,7 @@ RULES = {
     "wifi_status": _wifi_status,
     "security_posture": _security_posture,
     "event_log_errors": _event_log_errors,
+    "threat_scan": _threat_scan,
     "recent_crashes": _recent_crashes,
     "disk_health": _disk_health,
     "battery_health": _battery_health,
@@ -521,6 +536,7 @@ FINDING_TOPICS = (
     ("os_updates_", r"updates? (are )?(available|waiting)|security update"),
     ("battery_", r"battery"),
     ("sec_", r"firewall|antivirus|encrypt|exposed port|malware"),
+    ("threat_", r"malware|virus|trojan|backdoor|threat|detect|sign-in|logon|password|powershell|kaspersky|defender|quarantin"),
 )
 MAIN_CAUSE_END = re.compile(r"\b(?:Separate problems?|Other problems?)\b", re.I)
 

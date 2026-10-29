@@ -256,8 +256,8 @@ def test_devices_cannot_choose_route_like_ids_or_markup_names(tmp_path, monkeypa
 
 def test_only_person_triggered_code_can_change_a_device():
     """Every call that may change a device (risk above "read") sits in a function reached only from an
-    approval endpoint: apply_fix (Approve & run), the Software tab's uninstall/update/leftover endpoints and the
-    Performance tab's Install OS updates."""
+    approval endpoint: apply_fix (Approve & run), the Software tab's uninstall/update/leftover endpoints, the
+    Performance tab's Install OS updates and the Threat Detection tab's approved actions."""
     import ast
 
     # Position of max_risk in each call, and its default when left out. A risk that is not the literal "read"
@@ -292,7 +292,8 @@ def test_only_person_triggered_code_can_change_a_device():
     plumbing = {"executor.py:execute", "planner.py:_run_step", "main.py:_run_software_job"}
     # Adding a device-changing path must be a deliberate change to this list.
     assert risky_callers == plumbing | {"planner.py:apply_fix", "main.py:uninstall_device_software", "main.py:update_device_software",
-                                        "main.py:quarantine_device_leftovers", "main.py:restore_device_quarantine", "main.py:install_device_os_updates"}
+                                        "main.py:quarantine_device_leftovers", "main.py:restore_device_quarantine", "main.py:install_device_os_updates",
+                                        "main.py:threat_action", "main.py:remove_device_microsoft", "main.py:fix_device_installer"}
 
 
 def test_a_failed_fix_is_recorded(tmp_path, monkeypatch):

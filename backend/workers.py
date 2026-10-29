@@ -22,9 +22,11 @@ def int_env(name, default):
 
 AI_EXECUTOR = ThreadPoolExecutor(int_env("AI_WORKER_THREADS", 4), thread_name_prefix="aiops-ai")
 MONITOR_EXECUTOR = ThreadPoolExecutor(2, thread_name_prefix="aiops-monitor")
-# One gate per event loop: an asyncio.Semaphore belongs to the loop it was first used on (tests run many loops).
-# A plain dict, pruned of closed loops: not every loop type (uvloop's, in the image) is sure to allow weak references.
+# One semaphore per event loop: an asyncio.Semaphore belongs to the loop it was first used on (tests run many
+# loops). Plain dicts, pruned of closed loops: not every loop type (uvloop's, in the image) is sure to allow
+# weak references.
 _gates = {}
+_slots = {}
 
 
 async def run_ai(function, *args, **kwargs):
@@ -37,12 +39,27 @@ async def run_monitor(function, *args, **kwargs):
     return await asyncio.get_running_loop().run_in_executor(MONITOR_EXECUTOR, functools.partial(function, *args, **kwargs))
 
 
+def _loop_semaphore(store, env, default):
+    loop = asyncio.get_running_loop()
+    semaphore = store.get(loop)
+    if semaphore is None:
+        for closed in [item for item in store if item.is_closed()]:
+            del store[closed]
+        semaphore = store[loop] = asyncio.Semaphore(int_env(env, default))
+    return semaphore
+
+
 def ai_gate():
     """Admits OLLAMA_MAX_PARALLEL AI generations at a time; the rest wait here without holding a thread."""
-    loop = asyncio.get_running_loop()
-    gate = _gates.get(loop)
-    if gate is None:
-        for closed in [item for item in _gates if item.is_closed()]:
-            del _gates[closed]
-        gate = _gates[loop] = asyncio.Semaphore(int_env("OLLAMA_MAX_PARALLEL", 1))
-    return gate
+    return _loop_semaphore(_gates, "OLLAMA_MAX_PARALLEL", 1)
+
+
+def diagnosis_limit():
+    return int_env("MAX_CONCURRENT_DIAGNOSES", 2)
+
+
+def diagnosis_slots():
+    """Admits MAX_CONCURRENT_DIAGNOSES diagnoses at a time, whoever started them (What's the issue?, onboarding,
+    the Performance tab); the rest wait in line as "queued". On a CPU the AI writes one report at a time
+    anyway, so more parallel diagnoses would only make each of them slower."""
+    return _loop_semaphore(_slots, "MAX_CONCURRENT_DIAGNOSES", 2)

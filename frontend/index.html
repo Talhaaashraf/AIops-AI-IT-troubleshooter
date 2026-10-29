@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=20261020c">
+  <link rel="stylesheet" href="/static/style.css?v=20261027a">
   <script>
     try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
   </script>
@@ -42,9 +42,11 @@
         <p class="nav-group">Operate</p>
         <button class="nav-item active" data-tab="dashboard"><svg><use href="#i-dashboard"/></svg>Dashboard</button>
         <button class="nav-item nav-highlight" data-tab="troubleshoot"><svg><use href="#i-spark"/></svg>What's the issue?</button>
+        <button class="nav-item" data-tab="live"><svg><use href="#i-gauge"/></svg>Live Troubleshooting <b id="live-count"></b></button>
         <button class="nav-item" data-tab="alerts"><svg><use href="#i-bell"/></svg>Alerts <b id="alert-count">0</b></button>
         <p class="nav-group">Health</p>
         <button class="nav-item" data-tab="security"><svg><use href="#i-shield"/></svg>Security</button>
+        <button class="nav-item" data-tab="threats"><svg><use href="#i-shield"/></svg>Threat Detection <b id="threat-count"></b></button>
         <button class="nav-item" data-tab="performance"><svg><use href="#i-gauge"/></svg>Performance</button>
         <button class="nav-item" data-tab="logs"><svg><use href="#i-list"/></svg>Event Logs</button>
         <p class="nav-group">AI</p>
@@ -54,6 +56,7 @@
         <p class="nav-group">Fleet</p>
         <button class="nav-item" data-tab="agents"><svg><use href="#i-devices"/></svg>Agents <b id="agent-count">0</b></button>
         <button class="nav-item" data-tab="software"><svg><use href="#i-box"/></svg>Software</button>
+        <button class="nav-item" data-tab="microsoft"><svg><use href="#i-box"/></svg>Microsoft Removal</button>
         <button class="nav-item" data-tab="add-agent"><svg><use href="#i-plus"/></svg>Add Agent</button>
       </nav>
 
@@ -174,8 +177,8 @@
 
         <div class="ts-layout">
           <section class="panel ts-form">
-            <label class="field-label" for="ts-device">Device</label>
-            <select id="ts-device" class="field-input"></select>
+            <p class="field-label">Devices <small id="ts-devices-hint" class="soft-label">tick up to 2: each gets its own diagnosis</small></p>
+            <div id="ts-devices" class="ts-device-list" role="group" aria-label="Devices to diagnose"><p class="soft-label">Loading devices...</p></div>
             <label class="field-label" for="ts-issue">Describe the issue</label>
             <textarea id="ts-issue" class="field-input" rows="3" maxlength="1000" placeholder="e.g. Internet is very slow since this morning / the laptop hangs whenever Chrome is open"></textarea>
             <p class="field-label">Or pick a common problem</p>
@@ -199,6 +202,7 @@
         </div>
 
         <section id="ts-session" class="panel hidden">
+          <div id="ts-session-switch" class="ts-session-switch hidden" role="tablist" aria-label="Sessions started together"></div>
           <div class="section-heading">
             <div><p class="kicker" id="ts-session-device">Session</p><h2 id="ts-session-issue">--</h2></div>
             <span id="ts-session-status" class="status-pill">--</span>
@@ -214,6 +218,89 @@
             </div>
           </div>
         </section>
+      </section>
+
+      <!-- ============================== LIVE TROUBLESHOOTING ============================== -->
+      <section id="live" class="tab">
+        <header class="page-heading">
+          <div>
+            <p class="kicker">Multi-device · right now</p>
+            <h1>Live Troubleshooting</h1>
+            <p class="subheading">Every device AIops is diagnosing, fixing or re-checking right now, and what it is doing. At most <strong id="live-limit">2</strong> diagnoses run at once (the AI writes one answer at a time on a CPU); more wait in line and start on their own.</p>
+          </div>
+          <button class="primary-button" type="button" data-goto="troubleshoot"><svg><use href="#i-spark"/></svg>New diagnosis</button>
+        </header>
+        <section class="panel">
+          <div class="live-slots">
+            <div><p class="kicker">Diagnosis slots</p><strong id="live-slots-text">--</strong></div>
+            <div id="live-slot-bar" class="live-slot-bar" aria-hidden="true"></div>
+          </div>
+          <div id="live-sessions" class="live-grid"><p class="soft-label">Loading...</p></div>
+        </section>
+        <section class="panel">
+          <div class="section-heading"><div><p class="kicker">Last hour</p><h2>Finished</h2></div></div>
+          <div id="live-recent" class="ts-history-list"><p class="soft-label">Nothing finished in the last hour.</p></div>
+        </section>
+      </section>
+
+      <!-- ============================== THREAT DETECTION ============================== -->
+      <section id="threats" class="tab">
+        <header class="page-heading">
+          <div>
+            <p class="kicker">Endpoint security · suggest-only</p>
+            <h1>Threat Detection</h1>
+            <p class="subheading">What the antivirus (Kaspersky, Defender, ClamAV) found and the security events worth a look, by category, each with its proof, its file's path and what to do. <strong>Nothing changes on the device until you approve an action.</strong></p>
+          </div>
+          <div class="button-row">
+            <label class="device-picker"><span>Device</span><select id="threat-device" class="field-input"></select></label>
+            <button id="threat-scan" class="primary-button" type="button"><svg><use href="#i-shield"/></svg>Scan now</button>
+          </div>
+        </header>
+        <section class="panel threat-head">
+          <p id="threat-status" class="soft-label">Pick a device.</p>
+          <div id="threat-sources" class="threat-sources"></div>
+          <div id="threat-categories" class="threat-categories"></div>
+        </section>
+        <div class="threat-layout">
+          <section class="panel">
+            <div class="section-heading">
+              <div><p class="kicker">Findings</p><h2 id="threat-filter-title">All categories</h2></div>
+              <button id="threat-explain" class="ghost-button" type="button"><svg><use href="#i-spark"/></svg>Explain with AI</button>
+            </div>
+            <div id="threat-explanation" class="threat-explanation hidden"></div>
+            <div id="threat-findings" class="threat-findings"><p class="soft-label">No scan yet.</p></div>
+          </section>
+          <aside class="panel threat-chat">
+            <div class="section-heading"><div><p class="kicker">Action chat</p><h2>Ask or tell AIops</h2></div></div>
+            <div id="threat-chat-messages" class="chat-messages">
+              <div class="chat-message assistant">Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "T1 ko rescan karo". I show an approval card: nothing runs until you approve it.</div>
+            </div>
+            <form id="threat-chat-form" class="chat-form">
+              <input id="threat-chat-input" autocomplete="off" maxlength="1000" placeholder="quarantine T1" aria-label="Ask or tell AIops">
+              <button type="submit">Send</button>
+            </form>
+            <div class="threat-quarantine">
+              <div class="section-heading"><div><p class="kicker">Restorable for 7 days</p><h3>Quarantined threats</h3></div><button id="threat-quarantine-load" class="ghost-button" type="button">Show</button></div>
+              <div id="threat-quarantine-list"></div>
+            </div>
+          </aside>
+        </div>
+        <dialog id="threat-dialog" class="threat-dialog">
+          <form method="dialog">
+            <p class="kicker" id="threat-dialog-kicker">Approve an action</p>
+            <h3 id="threat-dialog-title">--</h3>
+            <p id="threat-dialog-text"></p>
+            <p id="threat-dialog-path" class="threat-path-line"></p>
+            <label id="threat-dialog-confirm-wrap" class="hidden">Type the file name to delete it permanently: <code id="threat-dialog-name"></code>
+              <input id="threat-dialog-confirm" class="field-input" autocomplete="off" aria-label="File name">
+            </label>
+            <p class="soft-label">AIops runs it only because you approve it now. The approval is recorded under Decisions.</p>
+            <div class="button-row">
+              <button class="ghost-button" value="cancel" type="submit">Cancel</button>
+              <button id="threat-dialog-ok" class="primary-button" value="ok" type="submit">Approve &amp; run</button>
+            </div>
+          </form>
+        </dialog>
       </section>
 
       <!-- ============================== ALERTS ============================== -->
@@ -496,6 +583,36 @@
         </div>
       </section>
 
+      <!-- ============================== MICROSOFT REMOVAL ============================== -->
+      <section id="microsoft" class="tab">
+        <header class="page-heading">
+          <div>
+            <p class="kicker">Fleet · Microsoft products</p>
+            <h1>Microsoft Removal</h1>
+            <p class="subheading">Every Microsoft product on a device: Office / Microsoft 365, Store apps and other Microsoft programs. <strong>Remove completely</strong> clears Office's registry keys, service and tasks too — using Microsoft's own scrubber when it is on the device, otherwise Microsoft's documented manual cleanup. Keys and folders are backed up first, so you can <strong>restore for 7 days</strong> from the Software tab's Quarantine. Nothing runs until you approve it.</p>
+          </div>
+          <button id="ms-scan" class="primary-button"><svg><use href="#i-spark"/></svg>Scan now</button>
+        </header>
+        <div class="sw-toolbar">
+          <label class="sw-field"><span>Device</span><select id="ms-device" class="field-input"></select></label>
+          <label class="sw-field sw-search"><span>Search</span><input id="ms-search" class="field-input" type="search" placeholder="Name or publisher"></label>
+          <div id="ms-filter" class="mode-toggle sw-filter" role="radiogroup" aria-label="Filter">
+            <button class="mode-option active" type="button" data-ms-filter="all" role="radio" aria-checked="true">All</button>
+            <button class="mode-option" type="button" data-ms-filter="office" role="radio" aria-checked="false">Office / 365</button>
+            <button class="mode-option" type="button" data-ms-filter="appx" role="radio" aria-checked="false">Store apps</button>
+            <button class="mode-option" type="button" data-ms-filter="program" role="radio" aria-checked="false">Programs</button>
+          </div>
+        </div>
+        <div id="ms-blocker" class="ms-blocker hidden" role="status"></div>
+        <p id="ms-status" class="sw-status" role="status"></p>
+        <div class="table-wrap">
+          <table class="sw-table">
+            <thead><tr><th>Product</th><th>Type</th><th>Version</th><th>Size</th><th class="sw-actions-col">Actions</th></tr></thead>
+            <tbody id="ms-body"><tr><td colspan="5" class="empty-state">Pick a device and click Scan now.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- ============================== ADD AGENT ============================== -->
       <section id="add-agent" class="tab">
         <header class="page-heading">
@@ -553,6 +670,6 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261020c"></script>
+  <script src="/static/app.js?v=20261027a"></script>
 </body>
 </html>

@@ -44,7 +44,7 @@ PLAYBOOKS = [
      "tools": [("service_status", {"name": "Audiosrv"}, WINDOWS), ("service_status", {"name": "AudioEndpointBuilder"}, WINDOWS), ("event_log_errors", {}, ANY)],
      "keywords": ["sound", "audio", "speaker", "mic", "microphone", "headphone", "volume"]},
     {"id": "security", "title": "Security check", "issue": "Check this computer for security problems, malware signs or risky settings.",
-     "tools": [("security_posture", {}, ANY), ("startup_programs", {}, ANY), ("top_processes", {"sort_by": "cpu"}, ANY)],
+     "tools": [("security_posture", {}, ANY), ("threat_scan", {"hours": 168}, ANY), ("startup_programs", {}, ANY), ("top_processes", {"sort_by": "cpu"}, ANY)],
      "keywords": ["virus", "malware", "hack", "security", "firewall", "antivirus", "suspicious", "popup"]},
     {"id": "hardware", "title": "Hardware check", "issue": "Check the hardware: overheating, failing disk, battery wear, RAM, graphics and devices with driver problems.",
      "tools": [("hardware_health", {}, ANY), ("disk_health", {}, ANY), ("battery_health", {}, ANY), ("input_devices", {}, INPUT_OS)],
@@ -106,7 +106,7 @@ RELATED_FINDINGS = {
     "crashes": ("crash_", "log_", "disk_failing", "hw_", "ram_high"),
     "battery": ("battery_", "process_cpu", "cpu_high", "hw_overheating"),
     "audio": ("service_down:Audio", "log_", "hw_devices"),
-    "security": ("sec_", "startup_many", "process_cpu"),
+    "security": ("sec_", "threat_", "startup_many", "process_cpu"),
     "hardware": ("hw_", "disk_failing", "disk_slow", "battery_worn", "input_"),
     "os_health": ("services_failed", "service_down", "reboot_pending", "os_updates_", "updates_available", "crash_", "log_", "disk_failing"),
 }
@@ -208,6 +208,11 @@ def _tip(title, why, *steps, os=None):
 # Safe, manual suggestions used only to top a diagnosis up to 3 options when the model and the rules
 # offered fewer. They never run anything: the person follows them by hand. Steps name the tools of each OS.
 PLAYBOOK_TIPS = {
+    "security": [
+        _tip("Run a full antivirus scan", "Finds what a quick scan or the logs missed.", "Open the antivirus (Kaspersky or Windows Security) and start a full scan.", "Leave the computer on until it finishes.", os=WINDOWS),
+        _tip("Review the Threat Detection tab", "Shows every detection with its proof, its file and what to do, by category.", "Open Threat Detection in AIops and pick this device.", "Approve Quarantine or Rescan on a finding there."),
+        _tip("Change passwords used on this device", "If something stole a password, a new one locks it out.", "Change the Windows / email passwords from another, clean device.", "Turn on two-factor sign-in where you can."),
+    ],
     "no_internet": [
         _tip("Restart the router and this computer's network", "Clears a stuck connection on either side.", "Turn the router off for 30 seconds, then on.", "Turn Wi-Fi off and on again on the computer."),
         _tip("Try another network", "Tells a problem with this computer apart from a problem with the network.", "Connect to a phone hotspot.", "If websites work there, the router or provider is the problem."),

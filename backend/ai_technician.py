@@ -308,3 +308,111 @@ def review_leftovers(program, candidates, think=False):
             verdict = str(entry.get("verdict") or "unsure").lower()
             items.append({"id": entry["id"], "verdict": verdict if verdict in LEFTOVER_VERDICTS else "unsure", "reason": " ".join(str(entry.get("reason") or "").split())[:240]})
     return {"summary": " ".join(str(result.get("summary") or "").split())[:500], "items": items}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint threat detection: explain the findings, and the action chat
+# ---------------------------------------------------------------------------
+
+THREAT_PROMPT = (
+    "You are an experienced security analyst helping an IT technician with one device's endpoint threat findings: antivirus "
+    "detections, failed sign-ins, account changes, new services and tasks, PowerShell, tampering and antivirus health. "
+    "The findings T1..Tn are facts from the device's own logs, checked by rules: never invent others, and name the ids you use. "
+    "Heuristic detections of security tools inside an ISO or archive (for example a Kali Linux image) are usually a tool someone "
+    "downloaded, not an infection; say so when it fits. " + BRAIN_PRINCIPLES + " Return valid JSON only."
+)
+THREAT_CHAT_RULES = (
+    " You are the dashboard's action chat. Answer in the language of the question (English or Roman Urdu), in a few sentences. "
+    "When the person asks to do something to a finding, set finding_id and action to it, but only an action that finding lists "
+    "as approvable; the dashboard then shows an approval card and nothing runs until the person approves it. Never say an "
+    "action was done or started. If they ask for something that is not approvable, set action to none and say how to do it by "
+    "hand (from the finding's steps). For a question, set action to none."
+)
+THREAT_ACTIONS = ("none", "rescan", "quarantine", "kill", "delete")
+# Fields with people's names, addresses and computer names: they stay on this server when the AI is a cloud one.
+PERSONAL_FIELDS = {"Account", "User", "Created by", "Cleared by", "Member", "Added by", "Installed by", "Source address", "Workstation",
+                   "New account", "Locked out from", "Runs as"}
+MAX_THREAT_FINDINGS = 25
+
+
+def _cloud_ai():
+    return getattr(get_provider(), "name", "") == "groq"
+
+
+USER_FOLDER = re.compile(r"(?i)([\\/](?:users|home)[\\/])[^\\/]+")
+
+
+def _for_ai(finding, cloud):
+    """The finding as the AI may see it. For a cloud AI, names, addresses and user folders are hidden everywhere
+    (title and summary repeat the proof's values)."""
+    if not cloud:
+        return finding
+    personal = sorted({str(item["value"]) for item in finding["proof"] if item["label"] in PERSONAL_FIELDS and len(str(item["value"])) > 1}, key=len, reverse=True)
+
+    def hide(text):
+        text = str(text or "")
+        for value in personal:
+            text = text.replace(value, "[hidden]")
+        return USER_FOLDER.sub(r"\1[user]", text)
+
+    return {**finding, "title": hide(finding["title"]), "summary": hide(finding["summary"]), "path": hide(finding.get("path")) if finding.get("path") else None,
+            "proof": [{**item, "value": "[hidden]" if item["label"] in PERSONAL_FIELDS else hide(item["value"])} for item in finding["proof"]]}
+
+
+def _threat_context(analysis):
+    from .threat_rules import finding_text
+
+    cloud = _cloud_ai()
+    lines = [finding_text(_for_ai(finding, cloud)) for finding in analysis["findings"][:MAX_THREAT_FINDINGS]]
+    unreadable = "; ".join(f"{source['name']}: {source['detail']}" for source in analysis.get("unreadable") or [])
+    return ("\n".join(lines) or "No findings: the scan found nothing suspicious.") + (f"\nNot readable on this device: {unreadable}" if unreadable else "")
+
+
+def _schema_completion(messages, schema, max_tokens, think=False):
+    if think:
+        return get_provider().chat(messages, json_mode=schema, max_tokens=max(max_tokens, THINKING_MAX_TOKENS), think=True, timeout=THINKING_TIMEOUT_SECONDS)["content"]
+    return get_provider().chat(messages, json_mode=schema, max_tokens=max_tokens, think=False)["content"]
+
+
+def explain_threats(analysis, think=False):
+    """What the findings mean and which come first. Advice only: actions are approved per finding in the dashboard."""
+    ids = [finding["id"] for finding in analysis["findings"][:MAX_THREAT_FINDINGS]] or ["none"]
+    schema = {"type": "object", "required": ["summary", "priorities", "next_steps"], "properties": {
+        "summary": {"type": "string"},
+        "priorities": {"type": "array", "items": {"type": "object", "required": ["finding_id", "why"],
+                                                  "properties": {"finding_id": {"type": "string", "enum": ids}, "why": {"type": "string"}}}},
+        "next_steps": {"type": "array", "items": {"type": "string"}}}}
+    raw = _schema_completion([
+        {"role": "system", "content": THREAT_PROMPT + ' Schema: {"summary": "2-3 sentences", "priorities": [{"finding_id": "T1", "why": "..."}], "next_steps": ["..."]}.'},
+        {"role": "user", "content": f"Device platform: {analysis.get('platform')}\nFindings:\n{_threat_context(analysis)}"},
+    ], schema, 500, think)
+    try:
+        result = _loads_lenient(raw)
+    except (TypeError, ValueError):
+        result = {}
+    known = set(ids)
+    priorities = [{"finding_id": item["finding_id"], "why": " ".join(str(item.get("why") or "").split())[:300]}
+                  for item in result.get("priorities") or [] if isinstance(item, dict) and item.get("finding_id") in known][:5]
+    return {"summary": " ".join(str(result.get("summary") or "").split())[:800], "priorities": priorities,
+            "next_steps": [" ".join(str(step).split())[:300] for step in _as_list(result.get("next_steps"))][:6], "source": "ai"}
+
+
+def threat_chat(message, analysis, history, think=False):
+    """{reply, finding_id, action, pid} from the action chat. The caller checks the proposal against the finding's
+    approvable actions (backend/threat_rules.proposal); nothing here runs anything."""
+    ids = [finding["id"] for finding in analysis["findings"][:MAX_THREAT_FINDINGS]] + ["none"]
+    schema = {"type": "object", "required": ["reply", "finding_id", "action"], "properties": {
+        "reply": {"type": "string"}, "finding_id": {"type": "string", "enum": ids},
+        "action": {"type": "string", "enum": list(THREAT_ACTIONS)}, "pid": {"type": "integer"}}}
+    messages = [{"role": "system", "content": THREAT_PROMPT + THREAT_CHAT_RULES +
+                 ' Schema: {"reply": "...", "finding_id": "T1 or none", "action": "none|rescan|quarantine|kill|delete", "pid": 0}.'}]
+    messages.extend({"role": item["role"], "content": str(item.get("content", ""))} for item in history[-6:])
+    messages.append({"role": "user", "content": f"Findings:\n{_threat_context(analysis)}\n\nQuestion: {message}"})
+    raw = _schema_completion(messages, schema, 350, think)
+    try:
+        result = _loads_lenient(raw)
+    except (TypeError, ValueError):
+        result = {"reply": raw}
+    pid = result.get("pid")
+    return {"reply": " ".join(str(result.get("reply") or "").split())[:1200], "finding_id": str(result.get("finding_id") or "none"),
+            "action": str(result.get("action") or "none"), "pid": pid if isinstance(pid, int) and pid > 0 else None}

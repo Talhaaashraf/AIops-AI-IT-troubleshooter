@@ -21,18 +21,18 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import decision_log, health_report, public_url, server_identity, software_store, task_queue, task_signals
+from . import decision_log, health_report, public_url, server_identity, software_store, task_queue, task_signals, threat_rules, threat_store
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
 from .agent_brain.executor import LOCAL_DEVICE_ID, execute, resolve_target
-from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, normalize_mode, record_late_fix_result, run_diagnosis
+from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, live_phase, normalize_mode, record_late_fix_result, run_diagnosis
 from .agent_brain.playbooks import get_playbook, public_playbooks
 from .learning import model_builder
 from .learning import store as learning_store
 from .llm import catalog as llm_catalog
 from .llm import get_provider as get_llm_provider
-from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, is_ai_available, review_leftovers
+from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, explain_threats, is_ai_available, review_leftovers, threat_chat
 from .alert_store import add_alert, get_alerts
 from .auth import SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_session, is_public_path, session_token
 from .collectors import collect_report
@@ -41,7 +41,7 @@ from .event_logs import collect_event_log_report
 from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, evaluate_rules, evaluate_security_rules, health_from_report
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, get_task, list_tasks, pending_change
-from .workers import int_env, run_ai, run_monitor
+from .workers import diagnosis_limit, int_env, run_ai, run_monitor
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -181,6 +181,7 @@ async def start_monitor():
     asyncio.create_task(offline_loop())
     asyncio.create_task(security_loop())
     asyncio.create_task(event_log_loop())
+    asyncio.create_task(threat_loop())
 
 
 def prepare_ai(reason):
@@ -552,7 +553,9 @@ async def rerun_onboarding(device_id: str):
 software_jobs = {}
 SOFTWARE_JOBS_KEPT = 200
 # Tools whose result data the dashboard needs to show (the rest only report a summary).
-JOB_DATA_TOOLS = {"find_leftovers", "quarantine_leftovers", "restore_quarantine", "list_quarantine", "install_os_updates"}
+JOB_DATA_TOOLS = {"find_leftovers", "quarantine_leftovers", "restore_quarantine", "list_quarantine", "install_os_updates",
+                  "threat_scan", "threat_rescan", "quarantine_threat", "delete_threat",
+                  "microsoft_products", "remove_microsoft", "fix_install_blocker"}
 CANDIDATE_ID_PATTERN = re.compile(r"^c\d{1,3}$")
 SCAN_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 BATCH_ID_PATTERN = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
@@ -694,9 +697,11 @@ async def _run_software_job(job, target, tool_id, args, max_risk):
     ok = bool(result.get("ok"))
     summary = result.get("summary") or ""
     if not ok and "Unknown or disallowed tool" in summary:
-        summary = OLD_AGENT_MESSAGE
+        summary = NEW_AGENT_MESSAGE if tool_id in THREAT_TOOLS or tool_id in MS_TOOLS else OLD_AGENT_MESSAGE
     if ok and tool_id == "installed_software":
         await asyncio.to_thread(software_store.save_inventory, target.device_id, result.get("data") or {})
+    if tool_id == "threat_scan":
+        await asyncio.to_thread(_after_threat_scan, target, ok, summary, result.get("data"))
     if changes_device:
         # An agent's result is recorded when it arrives (_after_task_result) and an expired task by
         # _record_expired_change; only this server's own changes are recorded here.
@@ -781,6 +786,45 @@ async def list_device_quarantine(device_id: str):
     return _start_software_job(target, "quarantine-list", "Quarantine", "list_quarantine", {}, "read")
 
 
+# --- Microsoft products: list, remove completely (registry too), fix a stuck installer ------------------------
+# Removals land in the same quarantine as the Software tab, so /software/restore and /software/quarantine-list
+# cover undoing them. Jobs show up in the Software tab too (same software_jobs store).
+MS_TOOLS = {"microsoft_products", "remove_microsoft", "fix_install_blocker"}
+MS_ID_PATTERN = re.compile(r"^(office\|[A-Za-z0-9]{1,8}|appx\|[A-Za-z0-9.+-]+_[0-9][0-9.]*_[A-Za-z0-9~]*_[A-Za-z0-9]*_[A-Za-z0-9]+|(HKLM64|HKLM32|HKCU|HKU:[^|]{1,60}|winget)\|[^|]{1,400})$")
+
+
+@app.get("/api/microsoft/{device_id}")
+def device_microsoft(device_id: str):
+    target = _software_target(device_id, manage=True)
+    running = [job for job in list(software_jobs.values()) if job["device_id"] == target.device_id and job["action"].startswith("ms-") and job["state"] == "running"]
+    return {"device_id": target.device_id, "device": target.label, "os_type": target.os_type, "jobs": running}
+
+
+@app.post("/api/microsoft/{device_id}/scan")
+async def scan_device_microsoft(device_id: str):
+    target = _software_target(device_id, manage=True)
+    running = next((job for job in list(software_jobs.values()) if job["device_id"] == target.device_id and job["action"] == "ms-scan" and job["state"] == "running"), None)
+    return running or _start_software_job(target, "ms-scan", "Microsoft products", "microsoft_products", {}, "read")
+
+
+@app.post("/api/microsoft/{device_id}/remove")
+async def remove_device_microsoft(device_id: str, payload: dict):
+    """Completely remove one Microsoft product (Office/365 with registry cleanup, a Store app, or another program).
+    The id must be one microsoft_products listed; the agent resolves the paths and keys on the device itself."""
+    target = _software_target(device_id, manage=True)
+    product_id = str(payload.get("id") or "").strip()
+    if not MS_ID_PATTERN.match(product_id):
+        raise HTTPException(status_code=400, detail="A valid product id from the Microsoft list is required")
+    return _start_software_job(target, "ms-remove", str(payload.get("name") or product_id)[:200], "remove_microsoft", {"id": product_id}, "high")
+
+
+@app.post("/api/microsoft/{device_id}/fix-installer")
+async def fix_device_installer(device_id: str):
+    """Fix a stuck Windows installer that blocks new installs (error 1618 / 'another installation in progress')."""
+    target = _software_target(device_id, manage=True)
+    return _start_software_job(target, "ms-fix", "Fix install blocker", "fix_install_blocker", {}, "medium")
+
+
 @app.post("/api/agents/{device_id}/software/leftovers/review")
 def review_device_leftovers(device_id: str, payload: dict):
     """AI advice on a finished leftover scan (which items look shared or risky). Advice only: nothing moves."""
@@ -804,6 +848,240 @@ def software_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found (the server may have restarted)")
     return job
+
+
+# ============================================================================
+# Endpoint threat detection (agent/toolkit/threats.py, backend/threat_rules.py)
+# ============================================================================
+
+THREAT_TOOLS = {"threat_scan", "threat_rescan", "quarantine_threat", "delete_threat"}
+THREAT_SCAN_HOURS = 168
+# Actions run on the agent's own scan file, which it keeps for 6 hours (threats.SCAN_TTL_SECONDS).
+THREAT_SCAN_FRESH_SECONDS = 6 * 3600
+threat_unsupported = {}  # device_id -> time until which its agent is known to be too old for threat scans
+
+
+def _threat_target(device_id):
+    target = resolve_target(device_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if target.is_local and server_identity.in_docker():
+        raise HTTPException(status_code=400, detail="The AIops container has no antivirus or Windows logs: install the agent on this server (Add Agent) to scan it.")
+    return target
+
+
+def _threat_jobs(device_id, running_only=True):
+    return [job for job in list(software_jobs.values())
+            if job["device_id"] == device_id and job["action"].startswith("threat-") and (job["state"] == "running" or not running_only)]
+
+
+def _threat_analysis(target):
+    latest = threat_store.latest_scan(target.device_id)
+    if not latest:
+        return None, None
+    return threat_rules.analyze_threats(latest["data"], target.os_type, threat_store.get_marks(target.device_id)), latest
+
+
+def _scan_age_seconds(analysis):
+    try:
+        return time.time() - datetime.fromisoformat(analysis["scanned_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+
+
+def _after_threat_scan(target, ok, summary, data):
+    """Store a finished scan; new critical and high findings become alerts (one per finding while it stays open)."""
+    if not ok or not isinstance(data, dict):
+        if summary == NEW_AGENT_MESSAGE:
+            threat_unsupported[target.device_id] = time.time() + THREAT_SCAN_FRESH_SECONDS
+        return
+    threat_unsupported.pop(target.device_id, None)
+    threat_store.save_scan(target.device_id, data)
+    analysis = threat_rules.analyze_threats(data, target.os_type, threat_store.get_marks(target.device_id))
+    for finding in analysis["findings"]:
+        if finding["status"] == "active" and finding["severity"] in ("critical", "high"):
+            add_alert({"severity": finding["severity"], "category": "Threat", "description": f"{finding['title']} ({finding['source']}): open Threat Detection"}, target.device_id)
+
+
+def _start_threat_scan(target):
+    running = next((job for job in _threat_jobs(target.device_id) if job["action"] == "threat-scan"), None)
+    return running or _start_software_job(target, "threat-scan", "Threat scan", "threat_scan", {"hours": THREAT_SCAN_HOURS}, "read")
+
+
+def threat_scan_minutes():
+    """How often each online device is scanned on its own (THREAT_SCAN_MINUTES, 0 = only when someone clicks Scan now)."""
+    try:
+        return max(0, int(os.getenv("THREAT_SCAN_MINUTES", "60")))
+    except ValueError:
+        return 60
+
+
+async def threat_loop():
+    """Scans every online device every THREAT_SCAN_MINUTES (read-only), so detections show up without a click."""
+    while True:
+        await asyncio.sleep(300)
+        minutes = threat_scan_minutes()
+        if not minutes:
+            continue
+        try:
+            scans = await asyncio.to_thread(threat_store.latest_scans)
+            started = 0
+            for device in await asyncio.to_thread(list_devices):
+                device_id = device["device_id"]
+                if device.get("status") != "online" or threat_unsupported.get(device_id, 0) > time.time() or _threat_jobs(device_id):
+                    continue
+                latest = scans.get(device_id)
+                if latest and time.time() - datetime.fromisoformat(latest["created_at"]).timestamp() < minutes * 60:
+                    continue
+                target = resolve_target(device_id)
+                if target is None or await asyncio.to_thread(_change_in_progress, device_id):
+                    continue
+                _start_threat_scan(target)
+                started += 1
+                if started >= 5:  # the rest get their turn in the next round
+                    break
+        except Exception:
+            logger.exception("Scheduled threat scans failed")
+
+
+@app.get("/api/threats")
+def threats_overview():
+    """Every device's latest threat scan in numbers, for the device list of the Threat Detection tab."""
+    scans = threat_store.latest_scans()
+    devices = []
+    for device in list_devices():
+        latest = scans.get(device["device_id"])
+        entry = {"device_id": device["device_id"], "device": device.get("nickname") or device.get("hostname"), "os_type": device["os_type"],
+                 "status": device["status"], "scanned_at": None, "open": 0, "worst": None, "scanning": bool(_threat_jobs(device["device_id"]))}
+        if latest:
+            analysis = threat_rules.analyze_threats(latest["data"], device["os_type"], threat_store.get_marks(device["device_id"]))
+            open_ones = [finding for finding in analysis["findings"] if finding["status"] == "active"]
+            entry.update(scanned_at=latest["created_at"], open=len(open_ones),
+                         worst=max((finding["severity"] for finding in open_ones), key=threat_rules.SEVERITIES.index, default=None))
+        devices.append(entry)
+    return {"devices": devices, "scan_minutes": threat_scan_minutes()}
+
+
+@app.get("/api/threats/{device_id}")
+def device_threats(device_id: str):
+    target = _threat_target(device_id)
+    analysis, latest = _threat_analysis(target)
+    return {"device_id": target.device_id, "device": target.label, "os_type": target.os_type, "scan": analysis,
+            "stored_at": (latest or {}).get("created_at"), "stale": bool(analysis) and _scan_age_seconds(analysis) > THREAT_SCAN_FRESH_SECONDS,
+            "jobs": _threat_jobs(target.device_id), "scan_minutes": threat_scan_minutes()}
+
+
+@app.post("/api/threats/{device_id}/scan")
+async def scan_device_threats(device_id: str):
+    return _start_threat_scan(_threat_target(device_id))
+
+
+def _current_finding(target, finding_id):
+    analysis, _ = _threat_analysis(target)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Scan this device first")
+    finding = threat_rules.find(analysis, finding_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="That finding is not in the latest scan: scan again")
+    return analysis, finding
+
+
+@app.post("/api/threats/{device_id}/actions")
+async def threat_action(device_id: str, payload: dict):
+    """Run one approved action on one finding: rescan, quarantine, delete (its file) or kill (its running process).
+    Only an action the finding offers, on the agent's own scan: the agent sends a scan id and an item id, and finds
+    the path in its own scan file. Recorded in the decision log like every approved change."""
+    target = _threat_target(device_id)
+    analysis, finding = _current_finding(target, payload.get("finding_id"))
+    action = str(payload.get("action") or "")
+    card = threat_rules.proposal(analysis, finding["id"], action, payload.get("pid"))
+    if not card:
+        raise HTTPException(status_code=400, detail=f"{action or 'That action'} is not offered for {finding['id']}")
+    if _scan_age_seconds(analysis) > THREAT_SCAN_FRESH_SECONDS:
+        raise HTTPException(status_code=409, detail="This scan is more than 6 hours old: scan again, then approve the action.")
+    if action == "kill":
+        args = {"pid": card["pid"], "expected_name": next(item["name"] for item in finding["actions"] if item.get("pid") == card["pid"])}
+    else:
+        args = {"scan_id": analysis["scan_id"], "item_id": finding["item_id"]}
+    if action == "delete":
+        confirm = str(payload.get("confirm") or "").strip()
+        if confirm.lower() != str(card["confirm"]).lower():
+            raise HTTPException(status_code=400, detail=f"Type the file name ({card['confirm']}) to confirm the permanent delete")
+        args["confirm"] = confirm
+    name = f"{card['label']}: {finding['title']}"[:200]
+    return _start_software_job(target, f"threat-{action}", name, threat_rules.ACTION_TOOLS[action], args, threat_rules.ACTION_RISK[action])
+
+
+@app.post("/api/threats/{device_id}/marks")
+def threat_mark(device_id: str, payload: dict):
+    """Acknowledge a finding, mark it a false positive, or reopen it (status null). Kept across scans."""
+    target = _threat_target(device_id)
+    _, finding = _current_finding(target, payload.get("finding_id"))
+    status = payload.get("status") or None
+    if status not in (None, *threat_store.MARK_STATUSES):
+        raise HTTPException(status_code=400, detail="status must be acknowledged, false_positive or null")
+    note = " ".join(str(payload.get("note") or "").split())[:300] or None
+    threat_store.set_mark(target.device_id, finding["dedup_key"], status, note)
+    decision_log.record("threat_mark", target.device_id, {"device": target.label, "device_id": target.device_id, "action": f"{status or 'reopened'}: {finding['title']}",
+                                                          "finding": finding["dedup_key"], "note": note, "decided_by": "operator"})
+    return {"ok": True, "finding_id": finding["id"], "status": status}
+
+
+@app.post("/api/threats/{device_id}/explain")
+def threat_explain(device_id: str, payload: dict):
+    """What the findings mean and what comes first: the AI's advice, or the rules' summary when it is off."""
+    target = _threat_target(device_id)
+    analysis, _ = _threat_analysis(target)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Scan this device first")
+    if not analysis["findings"] or not is_ai_available():
+        return {**threat_rules.rules_explanation(analysis), "source": "rules"}
+    think = bool(payload.get("think"))
+    try:
+        result = explain_threats(analysis, think=think)
+    except (AIModelUnavailableError, AIUnavailableError) as error:
+        return {**threat_rules.rules_explanation(analysis), "source": "rules", "note": str(error)}
+    if not result["summary"]:
+        result = {**threat_rules.rules_explanation(analysis), "source": "rules", "note": "The AI gave no usable answer"}
+    _record_ai("threat_analysis", target.device_id, think, {"summary": result["summary"], "priorities": result["priorities"], "steps": result["next_steps"]})
+    return result
+
+
+@app.post("/api/threats/{device_id}/chat")
+def threat_chat_endpoint(device_id: str, payload: dict):
+    """The action chat: answers about the findings and turns "quarantine T1" into an approval card. It never runs
+    anything: the card's Approve calls /actions, which checks everything again."""
+    target = _threat_target(device_id)
+    message = " ".join(str(payload.get("message") or "").split())[:1000]
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    analysis, _ = _threat_analysis(target)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Scan this device first")
+    asked_id, asked_action = threat_rules.parse_request(message, analysis)
+    history_key = f"threat:{payload.get('session_id', 'default')}:{target.device_id}"
+    history = chat_sessions.setdefault(history_key, [])
+    source, reply, card = "rules", None, None
+    if is_ai_available():
+        try:
+            answer = threat_chat(message, analysis, history, think=bool(payload.get("think")))
+            reply, source = answer["reply"], "ai"
+            card = threat_rules.proposal(analysis, answer["finding_id"], answer["action"], answer["pid"])
+        except (AIModelUnavailableError, AIUnavailableError) as error:
+            reply = f"The AI is not available ({error})."
+    if card is None and asked_action:
+        card = threat_rules.proposal(analysis, asked_id, asked_action)
+    if not reply:
+        actionable = ", ".join(f"{finding['id']} ({'/'.join(item['action'] for item in finding['actions'])})" for finding in analysis["findings"] if finding["actions"])
+        reply = (f"Ready to {card['label'].lower()} {card['finding_id']} ({card['title']}). Approve it below to run it." if card else
+                 "Name a finding and an action, for example \"quarantine T1\"." + (f" Findings with actions: {actionable}." if actionable else " No finding in this scan offers an action."))
+    elif card is None and asked_action and asked_id:
+        reply += f" ({asked_action} is not available for {asked_id}: see its suggested steps.)"
+    history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
+    chat_sessions[history_key] = history[-6:]
+    if source == "ai":
+        _record_ai("threat_chat", target.device_id, bool(payload.get("think")), {"question": message[:500], "summary": reply, "proposal": card})
+    return {"reply": reply, "proposal": card, "source": source}
 
 
 @app.post("/api/agents/{device_id}/os-updates/install")
@@ -1272,25 +1550,83 @@ def troubleshoot_tools(device_id: str = LOCAL_DEVICE_ID):
     return {"os_type": target.os_type, "tools": describe_tools(target.os_type)}
 
 
+MAX_DEVICES_PER_START = 2
+
+
+def _requested_device_ids(payload):
+    """device_ids (up to MAX_DEVICES_PER_START, duplicates dropped), or the older single device_id."""
+    raw = payload.get("device_ids")
+    if raw is None:
+        return [str(payload.get("device_id") or "").strip() or _default_target_id()]
+    if not isinstance(raw, list) or not raw or not all(isinstance(item, str) and item.strip() for item in raw):
+        raise HTTPException(status_code=400, detail="device_ids must be a list of device ids")
+    ids = list(dict.fromkeys(item.strip() for item in raw))
+    if len(ids) > MAX_DEVICES_PER_START:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_DEVICES_PER_START} devices at once")
+    return ids
+
+
+def _session_source(session):
+    if session.get("issue") == ONBOARDING_ISSUE:
+        return "Onboarding check"
+    if session.get("playbook_id") == "performance":
+        return "Performance test"
+    return "What's the issue?"
+
+
 @app.post("/api/troubleshoot")
 async def start_troubleshoot(payload: dict):
+    """Diagnose one or two devices for the same issue: one session each. At most MAX_CONCURRENT_DIAGNOSES run at
+    once across the server; the others wait in line (backend/workers.py:diagnosis_slots)."""
     issue = str(payload.get("issue", "")).strip()[:1000]
     playbook_id = str(payload.get("playbook_id") or "").strip() or None
     if not issue:
         raise HTTPException(status_code=400, detail="Describe the issue first")
-    target = resolve_target(str(payload.get("device_id") or "").strip() or _default_target_id())
-    if target is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+    targets = []
+    for device_id in _requested_device_ids(payload):
+        target = resolve_target(device_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Device not found: {device_id}")
+        targets.append(target)
+    # Checked before any session is created, so a refused request starts nothing.
+    active = {session["device_id"]: session for session in session_store.list_active_sessions() if session["status"] in ("queued", "running")}
+    for target in targets:
+        if target.device_id in active:
+            raise HTTPException(status_code=409, detail=f"{target.label} is already being diagnosed: open it from the Live Troubleshooting tab.")
     # Without a working AI the session still runs and returns the instant rule-based diagnosis.
     mode = normalize_mode(payload.get("mode"))
-    session_id = session_store.create_session(target.device_id, target.label, target.os_type, issue, playbook_id)
-    _spawn(run_diagnosis(session_id, mode))
-    return {"session_id": session_id, "status": "queued", "device": target.label, "mode": mode}
+    started = []
+    for target in targets:
+        session_id = session_store.create_session(target.device_id, target.label, target.os_type, issue, playbook_id)
+        _spawn(run_diagnosis(session_id, mode))
+        started.append({"session_id": session_id, "status": "queued", "device": target.label, "device_id": target.device_id, "mode": mode})
+    return {**started[0], "sessions": started}
 
 
 @app.get("/api/troubleshoot/sessions")
 def troubleshoot_sessions(device_id: str | None = None, limit: int = 30):
     return {"sessions": session_store.list_sessions(device_id, max(1, min(limit, 200)))}
+
+
+@app.get("/api/troubleshoot/active")
+def troubleshoot_active():
+    """The Live Troubleshooting tab: every device being diagnosed, fixed or re-checked now, what it is doing, and
+    the sessions that finished in the last hour. Declared before /api/troubleshoot/{session_id}."""
+    now = time.time()
+    sessions, waiting = [], []
+    for session in session_store.list_active_sessions():
+        phase = live_phase(session["session_id"]) or {}
+        started = datetime.fromisoformat(session["created_at"]).timestamp()
+        session.update(source=_session_source(session), phase=phase.get("phase"), waiting=bool(phase.get("waiting")),
+                       phase_seconds=round(now - phase["since"]) if phase.get("since") else None, elapsed_seconds=round(now - started), queue_position=None)
+        if session["waiting"]:
+            waiting.append(session)
+        sessions.append(session)
+    for position, session in enumerate(waiting, start=1):
+        session["queue_position"] = position
+    in_use = sum(1 for session in sessions if session["status"] in ("queued", "running") and not session["waiting"] and session["phase"])
+    recent = [{**session, "source": _session_source(session)} for session in session_store.list_recent_finished()]
+    return {"limit": diagnosis_limit(), "in_use": in_use, "sessions": sessions, "recent": recent}
 
 
 @app.get("/api/troubleshoot/audit")

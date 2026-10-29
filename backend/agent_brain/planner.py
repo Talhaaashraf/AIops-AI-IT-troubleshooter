@@ -20,6 +20,9 @@ rejection is written to the decisions folder (backend/decision_log.py).
 """
 
 import asyncio
+import contextlib
+import contextvars
+import functools
 import json
 import logging
 import os
@@ -39,7 +42,7 @@ from ..llm import LLMDisconnectedError, LLMTimeoutError, LLMUnavailableError, ge
 from ..llm.base import loads_lenient
 from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
 from ..server_identity import is_container_target, server_device
-from ..workers import ai_gate, run_ai
+from ..workers import ai_gate, diagnosis_limit, diagnosis_slots, run_ai
 from . import events, findings, session_store
 from .executor import execute, resolve_target
 from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, is_complaint, match_playbook, playbook_tips
@@ -71,6 +74,12 @@ SEVERITIES = ("low", "medium", "high", "critical")
 CONFIDENCES = ("low", "medium", "high")
 
 _session_locks = {}
+# What each active session is doing right now, for the Live Troubleshooting tab. In memory only: a restart marks
+# every active session failed anyway (session_store.mark_interrupted_sessions).
+live = {}
+# The session the running coroutine works for; tasks it starts inherit it, so _chat needs no session argument.
+_current_session = contextvars.ContextVar("aiops_session", default=None)
+STEP_PHASES = {"tool": "Running checks", "verify": "Re-checking after the fix", "fix": "Applying the approved fix"}
 
 INVESTIGATE_PROMPT = """You are AIops, an expert IT support technician remotely diagnosing a {os_type} computer.
 """ + BRAIN_PRINCIPLES + """
@@ -200,9 +209,62 @@ def _publish_status(session_id, status, message=""):
     events.publish(session_id, {"type": "status", "status": status, "message": message})
 
 
+def _set_phase(session_id, phase, **extra):
+    entry = live.get(session_id)
+    if entry is not None:
+        entry.update(phase=phase, phase_since=time.time(), **extra)
+
+
+@contextlib.contextmanager
+def _tracked(session_id, phase):
+    """Shows the session in the Live Troubleshooting tab while the block runs."""
+    token = _current_session.set(session_id)
+    live[session_id] = {"started": time.time(), "phase": phase, "phase_since": time.time(), "checks": [], "waiting": False}
+    try:
+        yield
+    finally:
+        live.pop(session_id, None)
+        _current_session.reset(token)
+
+
+def _tracking(phase):
+    """Decorator form of _tracked for a coroutine whose first argument is the session id."""
+    def wrap(function):
+        @functools.wraps(function)
+        async def run(session_id, *args, **kwargs):
+            with _tracked(session_id, phase):
+                return await function(session_id, *args, **kwargs)
+        return run
+    return wrap
+
+
+def live_phase(session_id):
+    """What an active session is doing now, in words: {phase, since, waiting}, or None when it is not running here."""
+    entry = live.get(session_id)
+    if not entry:
+        return None
+    checks = entry["checks"]
+    if checks:
+        kind = checks[-1][0]
+        names = [tool_id for _, tool_id in checks]
+        text = f"{STEP_PHASES.get(kind, 'Running checks')}: " + ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+        return {"phase": text, "since": entry["checks_since"], "waiting": False}
+    return {"phase": entry["phase"], "since": entry["phase_since"], "waiting": entry["waiting"]}
+
+
 async def _run_step(session_id, target, tool_id, args, max_risk="read", kind="tool"):
     events.publish(session_id, {"type": "step_started", "kind": kind, "tool_id": tool_id, "args": args})
-    result = await execute(target, tool_id, args, max_risk, session_id)
+    entry = live.get(session_id)
+    check = (kind, tool_id)
+    if entry is not None:
+        if not entry["checks"]:
+            entry["checks_since"] = time.time()
+        entry["checks"].append(check)
+    try:
+        result = await execute(target, tool_id, args, max_risk, session_id)
+    finally:
+        if entry is not None and check in entry["checks"]:
+            entry["checks"].remove(check)
     step = session_store.add_step(session_id, kind, tool_id, args, result)
     events.publish(session_id, {"type": "step", "step": step})
     return result
@@ -685,8 +747,12 @@ def ai_call_timeout(deep=False):
 
 async def _chat(messages, **kwargs):
     kwargs.setdefault("timeout", ai_call_timeout(deep=bool(kwargs.get("think"))))
+    session_id = _current_session.get()
+    if ai_gate().locked():
+        _set_phase(session_id, "Waiting for the AI: it is answering another diagnosis first")
     # Queued diagnoses wait for the gate as coroutines; only the running call holds a thread (backend/workers.py).
     async with ai_gate():
+        _set_phase(session_id, "The AI is thinking" if kwargs.get("think") else "The AI is writing its answer")
         try:
             return await run_ai(get_provider().chat, messages, **kwargs)
         except LLMDisconnectedError as error:
@@ -796,17 +862,25 @@ async def run_diagnosis(session_id, mode=None, preset_evidence=None):
         session_store.update_session(session_id, status="failed", error="Device no longer exists")
         events.publish(session_id, {"type": "error", "message": "Device no longer exists"})
         return
-    async with _lock(session_id):
-        try:
-            await _diagnose(session, target, normalize_mode(mode), preset_evidence)
-        except LLMUnavailableError as error:
-            logger.warning("Troubleshoot %s: LLM unavailable: %s", session_id, error)
-            session_store.update_session(session_id, status="failed", error=str(error))
-            events.publish(session_id, {"type": "error", "message": str(error)})
-        except Exception as error:
-            logger.exception("Troubleshoot session %s failed", session_id)
-            session_store.update_session(session_id, status="failed", error=f"{type(error).__name__}: {error}")
-            events.publish(session_id, {"type": "error", "message": "The troubleshooting agent hit an internal error. See server logs."})
+    with _tracked(session_id, "Starting"):
+        slots = diagnosis_slots()
+        if slots.locked():
+            limit = diagnosis_limit()
+            _set_phase(session_id, f"Waiting in line: {limit} diagnoses are running (at most {limit} at once)", waiting=True)
+            _publish_status(session_id, "queued", f"Waiting in line: {limit} diagnoses are already running (at most {limit} at once)")
+        async with slots:
+            _set_phase(session_id, "Starting", waiting=False)
+            async with _lock(session_id):
+                try:
+                    await _diagnose(session, target, normalize_mode(mode), preset_evidence)
+                except LLMUnavailableError as error:
+                    logger.warning("Troubleshoot %s: LLM unavailable: %s", session_id, error)
+                    session_store.update_session(session_id, status="failed", error=str(error))
+                    events.publish(session_id, {"type": "error", "message": str(error)})
+                except Exception as error:
+                    logger.exception("Troubleshoot session %s failed", session_id)
+                    session_store.update_session(session_id, status="failed", error=f"{type(error).__name__}: {error}")
+                    events.publish(session_id, {"type": "error", "message": "The troubleshooting agent hit an internal error. See server logs."})
     # Suggest-only: nothing is applied here. A person approves solutions in the dashboard.
     await learn_from(session_id)
 
@@ -843,6 +917,7 @@ async def _diagnose(session, target, mode, preset_evidence=None):
 
     playbook = get_playbook(session.get("playbook_id")) or match_playbook(issue)
     if preset_evidence:
+        _publish_status(session_id, "running", f"Analysing the {len(preset_evidence)} checks that just ran on {target.label}")
         _think(session_id, f"Starting from the {len(preset_evidence)} checks that just ran on {target.label} ({mode} mode).")
         evidence = _record_preset(session_id, preset_evidence)
     else:
@@ -1140,6 +1215,7 @@ async def _investigate(session_id, target, issue, evidence, found_block, alert_l
     return ""
 
 
+@_tracking("Starting the approved fix")
 async def apply_fix(session_id, index, approved_by="operator"):
     async with _lock(session_id):
         session = session_store.get_session(session_id, include_steps=False)
