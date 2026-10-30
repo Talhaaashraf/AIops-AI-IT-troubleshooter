@@ -639,3 +639,11 @@ def rule_report(findings, issue, note=None, playbook=None):
 def related_findings(findings, tool_id):
     """Findings a given fix tool is meant to resolve."""
     return [item for item in findings or [] if any(fix["tool_id"] == tool_id for fix in item.get("fixes", []))]
+
+
+def verification_steps(finding):
+    """How to confirm a finding is gone: the check that detects it (source tool), and the condition
+    that means it is fixed. Used to show a concrete verification plan before a fix is approved."""
+    if not finding:
+        return None
+    return {"source": finding.get("source"), "success": f"“{finding['title']}” is no longer detected when the checks run again."}

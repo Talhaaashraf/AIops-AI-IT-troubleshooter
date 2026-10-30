@@ -181,3 +181,40 @@ are covered by mocked tests only; live removal on the server is the user's call.
 
 - [ ] Groq selectable in the model switcher after a cloud warning; local stays the default
 - [ ] README, docs/04, docs/05, .env.example
+
+## Phase 10: Troubleshooting Intelligence (senior-engineer reasoning)
+
+Deepen the AI brain's reasoning without redesigning the app or weakening suggest-only. Full plan:
+[docs/TROUBLESHOOTING_INTELLIGENCE_PLAN.md](docs/TROUBLESHOOTING_INTELLIGENCE_PLAN.md). Server/rules build the
+structure; the CPU model only supplies the judgement a rule cannot. Phases I1-I6 and I8 are server-only (no
+agent reinstall); I7 adds device tools (reinstall).
+
+- [~] I1: Reasoning contract + hypotheses (server-only). `enrich_report` adds affected component, hypotheses
+  (likely/possible/ruled-out), eliminated causes, tests performed, verification plan, remaining uncertainty;
+  fact-vs-hypothesis clause in the brain principles; "What we considered" + verification-plan UI. Model output
+  surface unchanged (cause/why/confidence/solutions). Unit tests green (222 passed, `tests/test_reasoning_contract.py`).
+  On the server (user): browser render of the new report sections; `evaluate --mode fast` accuracy/timing not regressed.
+- [~] I2: Knowledge package + budgeted retriever (`backend/agent_brain/knowledge/`): investigation map (§8),
+  16 domain cards (§9-24), tool-knowledge (§42); `retrieve()` injects one selective, budget-capped domain card
+  into the report prompt and a tool hint into deep-mode investigate. Keyed off playbook else issue keywords.
+  Unit tests green (230 passed, `tests/test_knowledge.py`). Server (user): confirm `evaluate` timings hold.
+- [~] I3: Error-code / Event-ID / BSOD knowledge engines. `knowledge/{error_codes,event_ids,bugchecks}.py` + a
+  `detect_codes`/`retrieve_codes` that scans the issue text and evidence and injects ONLY the codes present
+  (1618, Office 3001x/3018x, 0x8024/0x800F, 0xC000xxxx; Kernel-Power 41, BugCheck 1001, WHEA 17-19/47, SCM
+  7000/7001, disk/Ntfs, App Error 1000/1002, benign DCOM 10016; bugchecks 0x1A/0x50/0xD1/0x0A/0x7E/0x9F/0xEF/0x139),
+  each teaching how to investigate and what NOT to conclude. NTFS-filesystem false positive guarded. Unit tests
+  green (236 passed, `tests/test_knowledge.py`).
+- [~] I4: Playbook engine upgrade. `knowledge/playbook_extras.py` adds per-domain clarifying questions, decision
+  points (rendered into deep-mode investigate), escalate-when and rollback; generic questions for unknown problems.
+- [~] I5: Unknown-handling + clarifying questions + escalation. `enrich_report` adds `clarifying_questions` when no
+  cause is pinned and a fact-based `escalation` note (failing disk / WHEA / crash / incomplete evidence); shown on the
+  report card and recorded. §39 holds (no auto-repeat).
+- [~] I6: Reasoning-based evaluation + learning upgrade. 2 new eval cases (bsod/audio), eval `hypotheses` check
+  (weighed + verification plan), and curated bad->good exemplars exported to training_data.jsonl (no live-prompt cost).
+- [~] I7: New read-only agent tools. `test_tcp_port` (printer 9100/515/631 + generic L4) and `driver_inventory`
+  (unsigned/recent drivers on Windows; modules on Linux/macOS) in diagnostics.py; wired into the knowledge layer.
+  TOOLKIT_VERSION 1.7.0->1.8.0. Bugcheck extraction not needed (codes engine reads it from crash text). Unit tests
+  green (256 passed). USER: rebuild the agent + re-run install so devices get 1.8.0 (I1-I6 work without it).
+- [~] I8: Fleet-wide correlation. `backend/fleet_correlation.py` groups recent learned cases by playbook across
+  distinct devices; adds a 'seen on N devices' note to a diagnosis (FLEET_MIN_DEVICES=3) and `GET /api/fleet`.
+  Shown on the report card, recorded in the decision log. Unit tests green (`tests/test_fleet.py`).

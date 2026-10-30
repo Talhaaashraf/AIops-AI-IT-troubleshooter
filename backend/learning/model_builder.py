@@ -113,8 +113,37 @@ def _modelfile(base, system, examples, version):
     return "\n".join(lines) + "\n"
 
 
+# Curated reasoning exemplars (spec §46-48), including a BAD->GOOD contrast. They are exported into the
+# fine-tune dataset to teach evidence-first reasoning; they are NOT injected into the live prompt, so they
+# add no tokens on the CPU at inference (the runtime reasoning gain comes from the knowledge/hypotheses layer).
+REASONING_EXEMPLARS = [
+    {"issue": "Printer is offline and will not print",
+     "bad": "Printer is offline, so reinstall the driver.",
+     "why_bad": "No network test, no port test, no spooler check — a fix with no evidence.",
+     "good": "Gather evidence first: ping the printer, test TCP 9100, open its web UI, check the spooler and the Windows port. "
+             "Ping, TCP 9100 and the web UI all succeed, but the Windows queue uses a WSD port, not a TCP/IP port. "
+             "So the network is healthy (ruled out) and the stronger hypothesis is the Windows port configuration, not the driver or connectivity."},
+    {"issue": "PC is slow",
+     "bad": "Run a disk cleanup and it will be faster.",
+     "why_bad": "Jumps to a fix before finding the bottleneck; cleanup does nothing if memory or CPU is the limit.",
+     "good": "Measure CPU, memory and disk first. RAM is at 93% (the browser holds most of it) while the disk has 110 GB free and the CPU is idle. "
+             "The bottleneck is memory, so disk cleanup is ruled out; closing memory-heavy apps or adding RAM is the real fix."},
+]
+
+
+def _exemplar_rows():
+    rows = []
+    for ex in REASONING_EXEMPLARS:
+        rows.append(json.dumps({"messages": [
+            {"role": "system", "content": BASE_SYSTEM},
+            {"role": "user", "content": f"Problem: {ex['issue']}\nContrast weak reasoning with evidence-first reasoning."},
+            {"role": "assistant", "content": f"Weak: \"{ex['bad']}\" — {ex['why_bad']} Evidence-first: {ex['good']}"},
+        ]}))
+    return rows
+
+
 def export_training_data(cases):
-    """Chat-format JSONL of trusted cases, ready for a LoRA fine-tune."""
+    """Chat-format JSONL of trusted cases plus the curated reasoning exemplars, ready for a LoRA fine-tune."""
     rows = []
     for case in cases:
         if not store.is_trusted(case):
@@ -124,6 +153,7 @@ def export_training_data(cases):
             {"role": "user", "content": f"Problem on {case.get('os_type')}: {case['issue']}\nEvidence: {json.dumps(case.get('evidence', []))}"},
             {"role": "assistant", "content": _example_answer(case)},
         ]}))
+    rows += _exemplar_rows()
     return "\n".join(rows) + ("\n" if rows else "")
 
 

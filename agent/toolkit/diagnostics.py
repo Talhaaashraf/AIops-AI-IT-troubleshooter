@@ -458,6 +458,25 @@ def dns_lookup(hostname):
     return {"ok": True, "summary": f"{hostname} resolved to {', '.join(addresses[:3])} in {elapsed} ms", "data": {"resolved": True, "addresses": addresses[:8], "ms": elapsed}}
 
 
+@tool("test_tcp_port", "Test whether a TCP port on a host is open (reachable) and time the connection. Use for printers (9100/515/631), a web/admin UI, databases, or any 'is the service reachable at the port?' question.",
+      params={"host": {"type": "string", "maxLength": 253, "description": "Host name or IP address"},
+              "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "TCP port, e.g. 9100"}},
+      required=("host", "port"), timeout=20)
+def test_tcp_port(host, port):
+    if not valid_host(host):
+        return {"ok": False, "summary": "Invalid host name"}
+    port = int(port)
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            pass
+    except OSError as error:
+        ms = round((time.perf_counter() - started) * 1000)
+        return {"ok": True, "summary": f"TCP {host}:{port} is CLOSED or unreachable ({error})", "data": {"host": host, "port": port, "open": False, "error": str(error), "ms": ms}}
+    ms = round((time.perf_counter() - started) * 1000)
+    return {"ok": True, "summary": f"TCP {host}:{port} is OPEN ({ms} ms)", "data": {"host": host, "port": port, "open": True, "ms": ms}}
+
+
 @tool("wifi_status", "Show the current Wi-Fi connection: network name, signal strength, radio type and link speed.")
 def wifi_status():
     system = os_name()
@@ -554,6 +573,47 @@ def recent_crashes():
     kinds = Counter(event["type"] for event in events)
     summary = ", ".join(f"{count}x {kind}" for kind, count in kinds.most_common()) or "No crashes found in the last 7 days"
     return {"ok": True, "summary": summary, "data": events[:25]}
+
+
+def _cim_date(value):
+    """The date part of a CIM/WMI datetime like '20230115000000.000000-000' -> 'YYYY-MM-DD', or None."""
+    match = re.match(r"(\d{4})(\d{2})(\d{2})", str(value or ""))
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}" if match else None
+
+
+@tool("driver_inventory", "Inventory device drivers and flag the notable ones: unsigned drivers and recently dated ones (Windows), or loaded kernel modules (Linux/macOS). Read-only. Use for driver-related crashes, device errors, or 'is this a driver problem?'.", timeout=60)
+def driver_inventory():
+    system = os_name()
+    if system == "Windows":
+        script = ("Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | "
+                  "Select-Object DeviceName,DeviceClass,DriverVersion,DriverDate,DriverProviderName,IsSigned | ConvertTo-Json -Compress")
+        output = powershell(script, timeout=50)["stdout"]
+        try:
+            rows = json.loads(output) if output else []
+        except json.JSONDecodeError:
+            rows = []
+        rows = rows if isinstance(rows, list) else [rows]
+        rows = [row for row in rows if isinstance(row, dict)]
+        unsigned, recent = [], []
+        cutoff = datetime.date.today() - datetime.timedelta(days=30)
+        for row in rows:
+            name = row.get("DeviceName") or row.get("DeviceClass") or "Unknown device"
+            if row.get("IsSigned") is False:
+                unsigned.append({"name": name, "provider": row.get("DriverProviderName"), "version": row.get("DriverVersion")})
+            date = _cim_date(row.get("DriverDate"))
+            if date and date >= cutoff.isoformat():
+                recent.append({"name": name, "version": row.get("DriverVersion"), "date": date})
+        recent.sort(key=lambda item: item["date"], reverse=True)
+        data = {"total": len(rows), "unsigned": unsigned[:10], "unsigned_count": len(unsigned), "recently_updated": recent[:10]}
+        summary = f"{len(rows)} drivers; {len(unsigned)} unsigned; {len(recent)} updated in the last 30 days"
+        return {"ok": True, "summary": summary, "data": data}
+    if system == "Linux":
+        output = run_command(["lsmod"])["stdout"]
+        modules = [line.split()[0] for line in output.splitlines()[1:] if line.strip()]
+        return {"ok": True, "summary": f"{len(modules)} loaded kernel modules", "data": {"total": len(modules), "modules": modules[:40]}}
+    output = run_command(["kextstat", "-l"])["stdout"]
+    third_party = [line for line in output.splitlines() if line.strip() and "com.apple." not in line]
+    return {"ok": True, "summary": f"{len(third_party)} third-party kernel extension(s) loaded", "data": {"third_party": [line.strip()[:120] for line in third_party[:30]]}}
 
 
 # ---------------------------------------------------------------------------

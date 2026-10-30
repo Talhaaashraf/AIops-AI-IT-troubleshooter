@@ -163,7 +163,8 @@ def test_model_builder_writes_modelfile_and_dataset(monkeypatch):
     assert info and info["version"] == 1 and info["created_in_ollama"] is True
     modelfile = (model_builder.LEARNED_DIR / "Modelfile").read_text(encoding="utf-8")
     assert "FROM " in modelfile and "Stale DNS cache" in modelfile and "MESSAGE assistant" in modelfile
-    assert len((model_builder.LEARNED_DIR / "training_data.jsonl").read_text(encoding="utf-8").splitlines()) == 3
+    # 3 trusted cases plus the curated reasoning exemplars (always exported for the fine-tune set).
+    assert len((model_builder.LEARNED_DIR / "training_data.jsonl").read_text(encoding="utf-8").splitlines()) == 3 + len(model_builder.REASONING_EXEMPLARS)
     assert calls[0]["model"] == model_builder.learned_model_name() and calls[0]["messages"]
     assert model_builder.maybe_rebuild() is None
 

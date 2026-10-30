@@ -51,3 +51,33 @@ def test_system_overview_runs():
     result = run_tool("system_overview")
     assert result["ok"] is True
     assert "CPU" in result["summary"]
+
+
+def test_test_tcp_port_detects_open_and_closed(tmp_path):
+    import socket
+    # An open port: a real listening socket on localhost.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        opened = run_tool("test_tcp_port", {"host": "127.0.0.1", "port": port})
+        assert opened["ok"] is True and opened["data"]["open"] is True
+    finally:
+        listener.close()
+    # The same port is closed once the listener is gone.
+    closed = run_tool("test_tcp_port", {"host": "127.0.0.1", "port": port})
+    assert closed["ok"] is True and closed["data"]["open"] is False
+
+
+def test_test_tcp_port_validates_input():
+    assert run_tool("test_tcp_port", {"host": "-t 127.0.0.1", "port": 80})["ok"] is False  # host injection
+    # Port out of range is rejected by the schema.
+    assert run_tool("test_tcp_port", {"host": "127.0.0.1", "port": 70000})["ok"] is False
+
+
+def test_driver_inventory_is_read_only_and_runs():
+    item = get_tool("driver_inventory")
+    assert item is not None and item.risk == "read"
+    result = run_tool("driver_inventory")
+    assert "ok" in result and isinstance(result.get("summary", ""), str)

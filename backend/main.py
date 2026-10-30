@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import decision_log, health_report, public_url, server_identity, software_store, task_queue, task_signals, threat_rules, threat_store
+from . import decision_log, fleet_correlation, health_report, public_url, server_identity, software_store, task_queue, task_signals, threat_rules, threat_store
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
@@ -1686,6 +1686,13 @@ def decisions_feed(limit: int = 50):
     # In Docker the folder is the project's ./decisions, mounted into the container.
     folder = "decisions/ in the AIops project folder" if os.getenv("SENTINEL_IN_DOCKER") else str(decision_log.decisions_dir())
     return {"folder": folder, "decisions": decision_log.recent(max(1, min(limit, 500)))}
+
+
+@app.get("/api/fleet")
+def fleet_overview():
+    """Possible fleet-wide (common-cause) incidents: the same kind of problem diagnosed on several devices
+    recently. Read-only, built from the learned-cases store; nothing is scanned or changed."""
+    return {"clusters": fleet_correlation.fleet_clusters()}
 
 
 @app.websocket("/ws/troubleshoot/{session_id}")

@@ -2588,6 +2588,46 @@ async function decideSolution(index, decision) {
   refreshTroubleshootSession();
 }
 
+const HYPOTHESIS_TONE = { likely: 'ok', possible: 'warning', ruled_out: 'unknown' };
+const HYPOTHESIS_LABEL = { likely: 'Likely', possible: 'Possible', ruled_out: 'Ruled out' };
+
+function renderHypotheses(report) {
+  const hypotheses = report.hypotheses || [];
+  if (!hypotheses.length) return '';
+  const items = hypotheses.map((item) => `<li>
+      <span class="status-pill ${HYPOTHESIS_TONE[item.status] || 'unknown'}">${escapeHtml(HYPOTHESIS_LABEL[item.status] || item.status)}</span>
+      <span class="hyp-title">${escapeHtml(item.title)}</span>${item.why ? `<span class="soft-label"> — ${escapeHtml(item.why)}</span>` : ''}
+    </li>`).join('');
+  return `<details class="ts-similar ts-hyps" open><summary class="ts-label">WHAT WE CONSIDERED (${hypotheses.length})</summary><ul>${items}</ul></details>`;
+}
+
+function renderVerificationPlan(report) {
+  const plan = report.verification_plan;
+  if (!plan || !(plan.steps || []).length) return '';
+  const steps = plan.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('');
+  return `<details class="ts-similar"><summary class="ts-label">HOW TO CONFIRM THE FIX</summary><ol class="ts-list">${steps}</ol>${plan.success ? `<p class="soft-label">${escapeHtml(plan.success)}</p>` : ''}</details>`;
+}
+
+function renderClarifyingQuestions(report) {
+  const questions = report.clarifying_questions || [];
+  if (!questions.length) return '';
+  const items = questions.map((q) => `<li>${escapeHtml(q)}</li>`).join('');
+  return `<div class="ts-questions"><small class="ts-label">QUESTIONS TO NARROW IT DOWN</small><ul class="ts-list">${items}</ul></div>`;
+}
+
+function renderEscalation(report) {
+  const esc = report.escalation;
+  if (!esc || !(esc.reasons || []).length) return '';
+  const items = esc.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('');
+  return `<div class="ts-escalate"><small class="ts-label">CONSIDER ESCALATING</small><ul class="ts-list">${items}</ul>${esc.note ? `<p class="soft-label">${escapeHtml(esc.note)}</p>` : ''}</div>`;
+}
+
+function renderFleet(report) {
+  const fleet = report.fleet;
+  if (!fleet || !fleet.message) return '';
+  return `<div class="ts-fleet"><small class="ts-label">SEEN ON OTHER DEVICES</small><p>${escapeHtml(fleet.message)}</p></div>`;
+}
+
 function renderTroubleshootSession(session) {
   setText('ts-session-device', `SESSION / ${session.device_label || session.device_id} / ${session.os_type || ''}`);
   setText('ts-session-issue', session.issue);
@@ -2638,13 +2678,19 @@ function renderTroubleshootSession(session) {
     ${session.status === 'failed' && session.error ? `<p class="ts-error">${escapeHtml(session.error)}</p>` : ''}
     ${timing}
     <div class="ts-root">
-      <div class="ts-badges"><span class="severity severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)}</span><span class="soft-label">confidence: ${escapeHtml(report.confidence)}</span></div>
+      <div class="ts-badges"><span class="severity severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)}</span><span class="soft-label">confidence: ${escapeHtml(report.confidence)}</span>${report.affected_component ? `<span class="soft-label">affected: ${escapeHtml(report.affected_component)}</span>` : ''}</div>
       <small>ROOT CAUSE</small>
       <strong>${escapeHtml(report.root_cause)}</strong>
+      ${report.remaining_uncertainty ? `<p class="ts-uncertainty soft-label">Remaining uncertainty: ${escapeHtml(report.remaining_uncertainty)}</p>` : ''}
     </div>
+    ${renderEscalation(report)}
+    ${renderFleet(report)}
     ${evidence ? `<small class="ts-label">EVIDENCE</small><ul class="ts-list">${evidence}</ul>` : ''}
+    ${renderHypotheses(report)}
+    ${renderClarifyingQuestions(report)}
     ${quickFindings}
     ${verify}
+    ${renderVerificationPlan(report)}
     ${renderSolutions(report, session)}
     ${reasoning}
     ${renderSimilarCases(report.similar_cases)}

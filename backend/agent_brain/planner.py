@@ -34,7 +34,7 @@ from agent.toolkit import get_tool, list_tools, tool_schemas
 from agent.toolkit.registry import validate_args
 from agent.toolkit.remediation import PROTECTED_PROCESSES, RESTARTABLE_SERVICES
 
-from .. import decision_log
+from .. import decision_log, fleet_correlation
 from ..alert_store import get_alerts
 from ..learning import model_builder
 from ..learning import store as learning_store
@@ -43,7 +43,7 @@ from ..llm.base import loads_lenient
 from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
 from ..server_identity import is_container_target, server_device
 from ..workers import ai_gate, diagnosis_limit, diagnosis_slots, run_ai
-from . import events, findings, session_store
+from . import events, findings, knowledge, session_store
 from .executor import execute, resolve_target
 from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, is_complaint, match_playbook, playbook_tips
 
@@ -943,6 +943,14 @@ async def _diagnose(session, target, mode, preset_evidence=None):
     report["mode"] = mode
     report["playbook_id"] = (playbook or {}).get("id")
     link_solutions(complete_solutions(report, playbook, found, target.os_type, evidence))
+    enrich_report(report, found, playbook, evidence, issue)
+    # Fleet correlation: is the same kind of problem hitting several devices? Read-only, best-effort.
+    if not is_container_target(target.device_id):
+        try:
+            report["fleet"] = await asyncio.to_thread(fleet_correlation.note_for, target.device_id, report.get("playbook_id"))
+        except Exception:
+            logger.debug("Fleet correlation failed", exc_info=True)
+            report["fleet"] = None
     total = time.perf_counter() - started
     report["timing"] = {"evidence_seconds": round(evidence_seconds, 1), "ai_seconds": round(total - evidence_seconds, 1), "total_seconds": round(total, 1)}
     session_store.update_session(session_id, status="diagnosed", report=report)
@@ -985,7 +993,7 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
     if rounds:
         checked = len(evidence)
         try:
-            notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds)
+            notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook)
         except LLMUnavailableError as error:
             # Another call would most likely fail the same way, so answer from the rules.
             logger.warning("Troubleshoot %s: investigation failed, using rules: %s", session_id, error)
@@ -1002,9 +1010,13 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
     recent = _recent_alert_lines(alerts)
     causes = [f"F{index}" for index, item in enumerate(numbered, 1) if findings.is_related(item, playbook)]
     schema = report_schema(causes, [tool.id for tool in tools], investigated=bool(rounds))
+    knowledge_block = knowledge.retrieve(issue, playbook, {item["key"] for item in found}, target.os_type, mode)
+    codes_block = knowledge.retrieve_codes(issue, evidence)
     report_messages = [
         {"role": "system", "content": REPORT_PROMPT},
         {"role": "user", "content": f"Computer: {target.os_type}\nUser's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nEvidence:\n{evidence_text}"
+                                    + (f"\n\nDomain knowledge (how a senior engineer investigates this):\n{knowledge_block}" if knowledge_block else "")
+                                    + (f"\n\nKnown codes seen (how to read them, not automatic causes):\n{codes_block}" if codes_block else "")
                                     + ("\n\nRecent monitoring alerts:\n" + "\n".join(recent) if recent else "")
                                     + (f"\n\nInvestigator notes: {notes}" if notes else "") + past_cases
                                     + f"\n\nFix tools you may name (id, risk, args: what it does):\n{fix_catalog(target.os_type, only) or '- none'}"},
@@ -1148,6 +1160,136 @@ def ground_root_cause(report, playbook, found, evidence):
     return report
 
 
+# ---------------------------------------------------------------------------
+# Reasoning contract: hypotheses, eliminated causes, tests performed, verification plan,
+# remaining uncertainty and the affected component. All computed by rules from data the
+# diagnosis already holds, so the model's output (cause/why/confidence/solutions) is unchanged
+# and no extra generation tokens are spent on a CPU.
+# ---------------------------------------------------------------------------
+
+# The finding behind a cause named as a plain component, for "Affected:".
+COMPONENT_BY_PREFIX = (
+    ("disk_full", "Disk / storage"), ("disk_slow", "Disk / storage"), ("disk_failing", "Disk / storage"), ("cleanup_", "Disk / storage"),
+    ("ram_high", "Memory (RAM)"), ("cpu_high", "CPU"), ("process_", "A running program"),
+    ("net_", "Network"), ("wifi_", "Wi-Fi"), ("print_", "Printer / spooler"),
+    ("service_down", "A system service"), ("services_failed", "System services"),
+    ("hw_overheating", "Cooling / temperature"), ("hw_thermal", "Cooling / temperature"), ("hw_throttling", "CPU (throttled)"),
+    ("hw_gpu", "Graphics"), ("hw_devices", "Device drivers"), ("hw_errors", "Hardware (RAM/CPU/disk)"),
+    ("input_", "Input devices"), ("crash_", "System stability"), ("boot_slow", "Start-up"), ("startup_many", "Start-up"),
+    ("long_uptime", "Uptime"), ("battery_", "Battery"), ("reboot_pending", "Pending updates"),
+    ("os_updates_", "Operating-system updates"), ("updates_available", "Operating-system updates"),
+    ("log_", "System event log"), ("sec_", "Security settings"), ("threat_", "Security / threats"),
+)
+
+# What each check looked at, in plain words, for "tests performed".
+TEST_LABELS = {
+    "system_overview": "Overall CPU, memory and disk usage", "top_processes": "The busiest programs",
+    "startup_programs": "Programs that start at sign-in", "hardware_health": "Hardware health (temperature, graphics, devices)",
+    "recent_crashes": "Recent crashes and unexpected restarts", "check_internet": "Internet connectivity (DNS, TCP, HTTP)",
+    "wifi_status": "Wi-Fi signal and link", "event_log_errors": "System event-log errors", "disk_health": "Physical disk health (SMART)",
+    "battery_health": "Battery wear", "update_status": "Pending updates and restarts", "printer_status": "Printer and print spooler",
+    "service_status": "A specific system service", "failed_services": "Failed system services", "cleanup_candidates": "Files that can be cleaned up",
+    "security_posture": "Firewall, antivirus and encryption", "threat_scan": "Antivirus and security logs",
+    "performance_benchmark": "Disk speed", "boot_performance": "Start-up time", "os_updates": "Operating-system updates",
+    "input_devices": "Keyboard, mouse and other input devices",
+}
+
+
+def _component_for(finding):
+    key = (finding or {}).get("key", "")
+    return next((name for prefix, name in COMPONENT_BY_PREFIX if key.startswith(prefix)), None)
+
+
+def _hypotheses(report, found, playbook):
+    """What was weighed: findings that can explain the complaint (the cause is `likely`, the rest `possible`)
+    and findings ruled out as the cause (separate problems that cannot cause this complaint)."""
+    by_key = {item["key"]: item for item in found}
+    hypotheses = []
+    for key in report.get("related_findings") or []:
+        item = by_key.get(key)
+        if item:
+            hypotheses.append({"title": item["title"], "status": "likely" if key == report.get("cause_finding") else "possible", "why": item.get("detail") or ""})
+    for key in report.get("other_findings") or []:
+        item = by_key.get(key)
+        if item:
+            hypotheses.append({"title": item["title"], "status": "ruled_out", "why": "A real problem, but it cannot cause what you reported; tracked as a separate problem."})
+    return hypotheses
+
+
+def _eliminated_causes(report, found):
+    by_key = {item["key"]: item for item in found}
+    return [by_key[key]["title"] for key in report.get("other_findings") or [] if key in by_key]
+
+
+def _tests_performed(evidence):
+    seen, labels = set(), []
+    for tool_id, _args, _result in evidence or []:
+        label = TEST_LABELS.get(tool_id, tool_id.replace("_", " "))
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
+
+
+def _verification_plan(report, found):
+    cause = next((item for item in found if item["key"] == report.get("cause_finding")), None)
+    recipe = findings.verification_steps(cause)
+    if recipe:
+        label = TEST_LABELS.get(recipe["source"], str(recipe["source"] or "").replace("_", " "))
+        steps = [f"Re-run the check: {label}." if label else "Run the diagnosis again.", "Compare the result with the evidence above."]
+        return {"steps": steps, "success": recipe["success"]}
+    return {"steps": ["Reproduce what you reported (the same program, network or action).", "Run the diagnosis again and compare with the evidence above."],
+            "success": "Fixed when the reported problem no longer happens and the checks stay clean."}
+
+
+def _remaining_uncertainty(report):
+    if report.get("complaint_reproduced") is False:
+        return ("The problem did not appear during the checks, so it may be intermittent or limited to certain conditions. "
+                "Run the diagnosis again while it is happening for a firmer answer.")
+    note = report.get("confidence_note")
+    if report.get("confidence") == "low":
+        return note or "The evidence does not clearly point to a single cause."
+    return note or "" if report.get("confidence") == "medium" else ""
+
+
+# Findings that, on their own, warrant a hands-on or hardware escalation (spec §40).
+ESCALATION_REASONS = {
+    "disk_failing": "A disk reports failing health — risk of data loss; back up now and plan to replace the drive.",
+    "hw_errors": "Hardware (WHEA/machine-check) errors are logged — a physical component may be failing.",
+    "crash_system": "The system crashed or restarted unexpectedly — if it keeps happening, escalate with the crash details.",
+}
+
+
+def _escalation(report, found, evidence):
+    """An escalation note when the evidence points to hardware/data-loss or is incomplete, else None.
+    Assembled from facts already in the report; never invents a reason."""
+    found_keys = {item["key"] for item in found}
+    reasons = [text for key, text in ESCALATION_REASONS.items() if key in found_keys]
+    failed = sorted({tool_id for tool_id, _args, result in evidence or [] if isinstance(result, dict) and not result.get("ok")})
+    if failed:
+        reasons.append(f"Some checks could not run ({', '.join(failed[:3])}), so the evidence is incomplete.")
+    if not reasons:
+        return None
+    return {"reasons": reasons, "note": "This likely needs hands-on or hardware attention. The root cause, evidence and tests above are the escalation summary."}
+
+
+def enrich_report(report, found, playbook, evidence, issue=""):
+    """Add the server-computed reasoning contract to a finished report (any mode). Rules only."""
+    found = found or []
+    cause = next((item for item in found if item["key"] == report.get("cause_finding")), None)
+    report["affected_component"] = _component_for(cause)
+    report["hypotheses"] = _hypotheses(report, found, playbook)
+    report["eliminated_causes"] = _eliminated_causes(report, found)
+    report["tests_performed"] = _tests_performed(evidence)
+    report["verification_plan"] = _verification_plan(report, found)
+    report["remaining_uncertainty"] = _remaining_uncertainty(report)
+    # Unknown/unreproduced: ask targeted questions instead of guessing (spec §28-29).
+    uncertain = report.get("cause_finding") is None and report.get("confidence") == "low"
+    report["clarifying_questions"] = knowledge.clarifying_questions(issue, playbook, found_keys={item["key"] for item in found}) if uncertain else []
+    report["escalation"] = _escalation(report, found, evidence)
+    return report
+
+
 def _record_diagnosis(session, target, report, found):
     ai = report.get("ai") or {}
     kind = "performance_analysis" if session.get("playbook_id") == "performance" else "diagnosis"
@@ -1161,6 +1303,11 @@ def _record_diagnosis(session, target, report, found):
         "severity": report.get("severity"), "cause_finding": report.get("cause_finding"), "complaint_reproduced": report.get("complaint_reproduced"),
         "ai_cause": report.get("ai_cause"), "ai_confidence": report.get("ai_confidence"),
         "related_findings": report.get("related_findings"), "other_findings": report.get("other_findings"),
+        "affected_component": report.get("affected_component"),
+        "hypotheses": [{"title": item.get("title"), "status": item.get("status")} for item in report.get("hypotheses") or []],
+        "eliminated_causes": report.get("eliminated_causes"), "tests_performed": report.get("tests_performed"),
+        "verification_plan": report.get("verification_plan"), "remaining_uncertainty": report.get("remaining_uncertainty"),
+        "clarifying_questions": report.get("clarifying_questions"), "escalation": report.get("escalation"), "fleet": report.get("fleet"),
         "solutions": [{key: item.get(key) for key in ("title", "why", "steps", "risk", "tool_id", "source", "scope")} for item in report.get("solutions") or []],
         "findings": [item["title"] for item in found], "evidence": report.get("evidence"),
         "reasoning_summary": tail_at_sentence(report.get("reasoning"), 1500), "reasoning_source": report.get("reasoning_source"), "timing": report.get("timing"),
@@ -1175,11 +1322,13 @@ def evidence_facts(found, evidence, limit=8):
     return facts[:limit]
 
 
-async def _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds):
+async def _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook=None):
     """Let the LLM call more read-only tools (in parallel); returns its closing notes."""
+    tool_hint = knowledge.investigate_tool_hint(issue, playbook, {item[0] for item in evidence}, target.os_type)
     messages = [
         {"role": "system", "content": INVESTIGATE_PROMPT.format(os_type=target.os_type)},
-        {"role": "user", "content": f"User's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nBaseline evidence:\n{_evidence_block(evidence, TOOL_RESULT_CHARS)}\n\nRecent monitoring alerts:\n{alert_lines}{past_cases}"},
+        {"role": "user", "content": f"User's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nBaseline evidence:\n{_evidence_block(evidence, TOOL_RESULT_CHARS)}\n\nRecent monitoring alerts:\n{alert_lines}{past_cases}"
+                                    + (f"\n\nWhich check answers which question (pick the one that tests your current hypothesis):\n{tool_hint}" if tool_hint else "")},
     ]
     schemas = tool_schemas(target.os_type, max_risk="read")
     allowed = {schema["function"]["name"] for schema in schemas}

@@ -23,7 +23,7 @@ from pathlib import Path
 from .eval_cases import CASES, CASES_BY_ID
 
 MAIN_CAUSE_END = re.compile(r"\b(?:Separate problems?|Other problems?)\b", re.I)
-COLUMNS = ("case", "cause", "not_blamed", "confidence", "os_steps", "solutions", "first", "fallback", "seconds", "prompt_tok", "output_tok")
+COLUMNS = ("case", "cause", "not_blamed", "confidence", "os_steps", "solutions", "hypotheses", "first", "fallback", "seconds", "prompt_tok", "output_tok")
 
 
 def main_cause(report):
@@ -44,6 +44,7 @@ def score(case, report, seconds=None):
     usage = ai.get("usage") or {}
     # A report without an AI model (or marked as a fallback) is the rule-based answer given when the AI failed.
     fallback = bool(ai.get("fallback")) or not ai.get("model")
+    found = report.get("quick_findings") or []
     return {
         "case": case["id"],
         "cause": bool(re.search(expect["cause"], cause, re.I)),
@@ -51,6 +52,9 @@ def score(case, report, seconds=None):
         "confidence": report.get("confidence") in expect["confidence"],
         "os_steps": not any(re.search(expect["forbidden"], _solution_text(item), re.I) for item in solutions),
         "solutions": 3 <= len(solutions) <= 4,
+        # Reasoning contract (I1): when the checks found something, the report must list what it weighed,
+        # and every report must carry a concrete verification plan.
+        "hypotheses": (bool(report.get("hypotheses")) or not found) and bool((report.get("verification_plan") or {}).get("steps")),
         "first": bool(solutions) and bool(re.search(expect["first"], _solution_text(solutions[0]), re.I)),
         "fallback": fallback,
         "seconds": round(seconds, 1) if seconds is not None else None,
@@ -96,7 +100,7 @@ def format_rows(rows):
 
     lines = [" | ".join(COLUMNS)]
     lines += [" | ".join(cell(row.get(column)) for column in COLUMNS) for row in rows]
-    checks = ("cause", "not_blamed", "confidence", "os_steps", "solutions", "first")
+    checks = ("cause", "not_blamed", "confidence", "os_steps", "solutions", "hypotheses", "first")
     totals = ", ".join(f"{column} {sum(1 for row in rows if row.get(column) is True)}/{len(rows)}" for column in checks)
     seconds = [row["seconds"] for row in rows if row.get("seconds") is not None]
     lines.append(f"TOTAL: {totals}; fallbacks {sum(1 for row in rows if row.get('fallback'))}; AI+checks {sum(seconds):.0f} s")

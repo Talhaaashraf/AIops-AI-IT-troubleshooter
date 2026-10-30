@@ -762,3 +762,18 @@ select.field-input { cursor: pointer; }
 #ms-body td small.soft-label { display: block; margin-top: 2px; font-size: .72rem; }
 .ghost-button.danger { border-color: color-mix(in srgb, var(--bad) 45%, var(--line-strong)); color: var(--bad); }
 .ghost-button.danger:hover:not(:disabled) { border-color: var(--bad); background: var(--bad-soft); }
+
+/* Reasoning contract: hypotheses ("What we considered") and verification plan. */
+.ts-hyps ul { list-style: none; margin: 0; padding: 0; }
+.ts-hyps li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+.ts-hyps li .hyp-title { font-weight: 600; }
+.ts-uncertainty { margin-top: 6px; }
+
+/* Escalation note and clarifying questions (I5). */
+.ts-escalate { margin: 10px 0; padding: 10px 12px; border-radius: 10px; background: var(--bad-soft); border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent); }
+.ts-escalate .ts-label { color: var(--bad); }
+.ts-questions { margin: 10px 0; }
+
+/* Fleet-wide correlation note (I8). */
+.ts-fleet { margin: 10px 0; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
+.ts-fleet .ts-label { color: var(--accent, var(--muted)); }
