@@ -31,6 +31,8 @@ def _recent(cases, window_days):
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     recent = []
     for case in cases:
+        if not learning_store.is_device_case(case):
+            continue
         try:
             when = datetime.fromisoformat(case["created_at"])
         except (KeyError, TypeError, ValueError):

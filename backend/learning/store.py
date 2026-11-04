@@ -8,6 +8,7 @@ corrected root cause) outranks the agent's own verdict.
 
 import json
 import math
+import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -18,6 +19,25 @@ from ..config import DB_PATH
 STOPWORDS = set("""a an and are as at be but by can do does for from has have i in is it its laptop computer pc my me of on or so the
 this to very was when with not no it's im i'm keeps keep since some all any after before while ka ki ke hai ho raha rahi nahi""".split())
 GOOD_OUTCOMES = ("resolved",)
+MIN_SIMILARITY = 0.35
+
+
+def _stem(word):
+    """Fold common ticket inflections without an extra runtime dependency."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 5 and word.endswith(("ches", "shes", "sses", "xes")):
+        word = word[:-2]
+    elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us")):
+        word = word[:-1]
+    for suffix in ("ing", "ed"):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            word = word[:-len(suffix)]
+            if len(word) > 3 and word[-1] == word[-2] and word[-1] in "bdfgmnprt":
+                word = word[:-1]
+            break
+    # Match freeze/freezing and update/updating as well as open/opening.
+    return word[:-1] if len(word) > 4 and word.endswith("e") else word
 
 
 def utc_now():
@@ -25,7 +45,7 @@ def utc_now():
 
 
 def tokenize(text):
-    return [word for word in re.findall(r"[a-z0-9][a-z0-9\-]+", (text or "").lower()) if word not in STOPWORDS and len(word) > 1]
+    return [_stem(word) for word in re.findall(r"[a-z0-9][a-z0-9\-]+", (text or "").lower()) if word not in STOPWORDS and len(word) > 1]
 
 
 def _connect():
@@ -36,6 +56,7 @@ def _connect():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT UNIQUE NOT NULL,
             device_id TEXT,
+            target_kind TEXT,
             os_type TEXT,
             issue TEXT NOT NULL,
             playbook_id TEXT,
@@ -50,6 +71,12 @@ def _connect():
             updated_at TEXT NOT NULL
         )
     """)
+    if "target_kind" not in {row[1] for row in connection.execute("PRAGMA table_info(learned_cases)")}:
+        try:
+            connection.execute("ALTER TABLE learned_cases ADD COLUMN target_kind TEXT")
+        except sqlite3.OperationalError as error:
+            if "duplicate column" not in str(error).lower():
+                raise
     connection.commit()
     return connection
 
@@ -84,13 +111,15 @@ def record_session(session):
         return None
     fixes = [{"tool_id": fix["tool_id"], "args": fix.get("args") or {}, "status": fix.get("status"), "ok": (fix.get("result") or {}).get("ok")} for fix in report.get("proposed_fixes", [])]
     now = utc_now()
+    local = (session.get("device_id") or "local") in ("local", "local-server")
+    target_kind = ("container" if os.getenv("SENTINEL_IN_DOCKER") else "local") if local else "agent"
     with _connect() as connection:
         connection.execute(
-            """INSERT INTO learned_cases (session_id, device_id, os_type, issue, playbook_id, root_cause, evidence_json, fixes_json, outcome, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO learned_cases (session_id, device_id, target_kind, os_type, issue, playbook_id, root_cause, evidence_json, fixes_json, outcome, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id) DO UPDATE SET root_cause=excluded.root_cause, evidence_json=excluded.evidence_json,
                fixes_json=excluded.fixes_json, outcome=excluded.outcome, updated_at=excluded.updated_at""",
-            (session["session_id"], session.get("device_id"), session.get("os_type"), session["issue"], session.get("playbook_id"),
+            (session["session_id"], session.get("device_id"), target_kind, session.get("os_type"), session["issue"], session.get("playbook_id") or report.get("playbook_id"),
              report.get("root_cause"), json.dumps(report.get("evidence", [])[:6]), json.dumps(fixes), outcome_for(session), now, now),
         )
         connection.commit()
@@ -119,33 +148,57 @@ def list_cases(limit=100):
         return [_case_dict(row) for row in rows]
 
 
+def is_device_case(case):
+    """Exclude containers and legacy local cases whose host/container origin is unknown."""
+    if case.get("target_kind") == "container":
+        return False
+    if (case.get("device_id") or "local") in ("local", "local-server"):
+        return case.get("target_kind") == "local"
+    return True
+
+
 def is_trusted(case):
     """A case worth learning from: verified resolved or confirmed by the operator, and never rejected."""
+    if not is_device_case(case):
+        return False
     if case.get("feedback") == "down":
         return bool(case.get("corrected_root_cause"))
     return case.get("feedback") == "up" or case.get("outcome") in GOOD_OUTCOMES
 
 
-def find_similar(issue, os_type=None, limit=3, trusted_only=True):
-    """Rank past cases by keyword overlap (idf-weighted) with the new issue."""
-    cases = [case for case in list_cases(1000) if (not trusted_only or is_trusted(case))]
+def find_similar(issue, os_type=None, limit=3, trusted_only=True, playbook_id=None):
+    """Recall relevant device cases from the same OS and playbook using weighted cosine similarity."""
+    from ..agent_brain.playbooks import match_playbook
+
+    playbook_id = playbook_id or (match_playbook(issue) or {}).get("id")
+    def matches(case):
+        case_playbook = case.get("playbook_id") or (match_playbook(case["issue"]) or {}).get("id")
+        return (is_device_case(case) and (not trusted_only or is_trusted(case))
+                and (not os_type or (case.get("os_type") or "").casefold() == os_type.casefold())
+                and case_playbook == playbook_id)
+
+    cases = [case for case in list_cases(1000) if matches(case)]
     if not cases:
         return []
     query = set(tokenize(issue))
     if not query:
         return []
-    documents = [set(tokenize(f"{case['issue']} {case.get('playbook_id') or ''} {case.get('effective_root_cause') or ''}")) for case in cases]
+    # A previous model's cause must not make an unrelated complaint look relevant.
+    documents = [set(tokenize(case["issue"])) for case in cases]
     document_frequency = Counter(token for document in documents for token in document)
     total = len(documents)
+    weights = {token: math.log(1 + total / (1 + document_frequency[token])) + 1
+               for token in query | set(document_frequency)}
+    query_norm = math.sqrt(sum(weights[token] ** 2 for token in query))
     scored = []
     for case, document in zip(cases, documents):
         overlap = query & document
         if not overlap:
             continue
-        score = sum(math.log(1 + total / document_frequency[token]) for token in overlap) / math.sqrt(len(document) + 1)
-        if os_type and case.get("os_type") == os_type:
-            score *= 1.2
-        scored.append((score, case))
+        document_norm = math.sqrt(sum(weights[token] ** 2 for token in document))
+        score = sum(weights[token] ** 2 for token in overlap) / (query_norm * document_norm)
+        if score >= MIN_SIMILARITY:
+            scored.append((score, case))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [dict(case, similarity=round(score, 3)) for score, case in scored[:limit]]
 
@@ -162,9 +215,9 @@ def fix_success_stats(cases):
     return dict(stats)
 
 
-def learned_fixes_for(issue, os_type, min_resolved=2, min_rate=0.6):
+def learned_fixes_for(issue, os_type, min_resolved=2, min_rate=0.6, playbook_id=None):
     """Fixes that resolved most of the similar past cases (candidates to propose again)."""
-    similar = find_similar(issue, os_type, limit=10, trusted_only=False)
+    similar = find_similar(issue, os_type, limit=10, trusted_only=False, playbook_id=playbook_id)
     result = []
     for tool_id, stat in fix_success_stats(similar).items():
         rate = stat["resolved"] / stat["attempts"] if stat["attempts"] else 0
@@ -177,7 +230,7 @@ def stats():
     cases = list_cases(5000)
     outcomes = Counter(case["outcome"] for case in cases)
     feedback = Counter(case["feedback"] for case in cases if case.get("feedback"))
-    fixes = fix_success_stats(cases)
+    fixes = fix_success_stats(case for case in cases if is_device_case(case))
     top_fixes = sorted(({"tool_id": tool_id, **value, "rate": round(value["resolved"] / value["attempts"], 2) if value["attempts"] else 0} for tool_id, value in fixes.items()), key=lambda item: item["resolved"], reverse=True)
     trusted = [case for case in cases if is_trusted(case)]
     return {

@@ -1,5 +1,7 @@
 # AIops: AI IT troubleshooter
 
+Originally named Sentinel. For its purpose, development history, decision review, and current implementation status, see [the project review](docs/09-sentinel-review-and-alignment.md).
+
 AIops monitors Windows, Linux and macOS computers and troubleshoots their software and hardware problems with a **local AI** (Ollama). You describe a problem, such as "internet is slow" or "the laptop keeps hanging". AIops then:
 
 1. runs diagnostic checks on the chosen device, in parallel;
@@ -20,6 +22,9 @@ AIops monitors Windows, Linux and macOS computers and troubleshoots their softwa
 | **Dashboard, Alerts, Security, Event Logs** | Live monitoring, alert rules, the security posture (firewall, antivirus, encryption, updates, open ports) and grouped event-log errors. These work without any AI. |
 | **Ask Technician** | Chat about a device's current state. |
 | **Learning** | Past tickets and the lessons the AI learned from them. |
+| **Live Troubleshooting** | Running and queued diagnoses, approved fixes, and re-checks across devices. Two diagnoses can run at once by default. |
+| **Endpoint Threat Detection** | Read-only threat scans with evidence and separately approved response actions. |
+| **Microsoft Removal** | Microsoft product inventory, approved removal, and installation-blocker repair on Windows. |
 | **Decisions** | The audit trail of every AI decision and every approval or rejection. |
 | **Add Agent** | A one-line install command for each OS. |
 
@@ -36,7 +41,7 @@ Copy-Item .env.example .env
 Edit `.env`:
 
 - `DASHBOARD_PASSWORD` and `ADMIN_API_KEY`: two different long random values.
-- `OLLAMA_MODEL`: `qwen3:8b` (most accurate, needs about 7 GB of free RAM) or `qwen3:4b` (for laptops with less free memory).
+- `OLLAMA_MODEL`: `qwen3:4b` (default for the CPU server); choose `qwen3:8b` only when enough memory is available and you have checked its accuracy and response time on your hardware.
 - `SENTINEL_PUBLIC_URL=http://<this PC's LAN IP>`: the address devices use to reach the server. Find the IP with `ipconfig`.
 
 Then start everything:
@@ -99,11 +104,12 @@ Optional per-device limits in the agent's `agent_config.json`:
 
   | Model | Download | Free RAM | License | Typical answer on a laptop CPU |
   | --- | --- | --- | --- | --- |
-  | `qwen3:4b` | 2.5 GB | 4 GB | Apache 2.0 | about 2 min |
-  | `qwen3:8b` (default) | 5.2 GB | 7 GB | Apache 2.0 | about 3-5 min |
+  | `qwen3:4b` (default) | 2.5 GB | 4 GB | Apache 2.0 | about 2 min |
+  | `qwen3:8b` | 5.2 GB | 7 GB | Apache 2.0 | about 3-5 min |
   | `qwen2.5:3b` | 1.9 GB | 3 GB | Qwen Research, no commercial use | about 1-1.5 min |
 
-- **`aiops-brain`.** At startup AIops builds its own model on top of the selected one. It adds the troubleshooting principles (best effort, evidence first, suggest only, 3-4 solutions, say when unsure) and the lessons from resolved tickets. This is training by instructions and examples, not by retraining the model's weights. The Learning tab exports the dataset if you want real fine-tuning. See [docs/05-self-improving-model.md](docs/05-self-improving-model.md).
+- **`aiops-brain`.** At startup AIops builds its own model on top of the selected one with troubleshooting principles: evidence first, suggest only, 3-4 solutions, and honest uncertainty. Relevant trusted tickets are retrieved separately for the same OS and playbook; old tickets are not embedded as global examples. This does not retrain the model's weights. The Learning tab exports a dataset for possible future fine-tuning. See [docs/05-self-improving-model.md](docs/05-self-improving-model.md).
+- **Reasoning support.** Selective domain and error-code knowledge supports the diagnosis. The report includes considered hypotheses, ruled-out causes, verification steps, uncertainty, and escalation guidance. Recent similar problems across devices can produce a fleet correlation note; this is a clue, not proof of a shared cause.
 - **Deep thinking** in deep mode: the model reasons before writing the diagnosis (`DIAGNOSIS_THINKING=true`, within `OLLAMA_MAX_THINKING_CHARS`), and the reasoning streams live in the session view. Fast mode answers directly. Chat, summaries and log analysis answer directly unless you tick **Think deeper**.
 - **Checked answers.** The findings are split into those that can explain the complaint and separate problems. The AI names the one it blames (its answer must follow a JSON schema), and the server checks it: a finding that cannot cause the complaint is never reported as the cause, and "high" confidence needs a severe finding that can. Measure it with `python -m backend.agent_brain.evaluate` (inside the container).
 - **Speed modes** on the What's the issue? tab:
@@ -114,7 +120,7 @@ Optional per-device limits in the agent's `agent_config.json`:
   | **Fast** (default) | Checks, rules and one direct AI report. | about 1-3 min (expected; measure with the evaluation) |
   | **Deep** | The AI also runs extra read-only checks before reporting. | 5-15 min |
 
-  AI calls run one at a time, so a diagnosis waits while another one is running.
+  Up to two diagnosis sessions run at once (`MAX_CONCURRENT_DIAGNOSES=2`); further sessions queue. Model generation remains one call at a time by default (`OLLAMA_MAX_PARALLEL=1`), so their diagnostic checks can overlap while AI calls wait their turn.
 - **Cloud option.** Set `LLM_PROVIDER=groq` and `GROQ_API_KEY` to use Groq instead of the local model.
 
 ## Security model
@@ -157,7 +163,8 @@ Optional per-device limits in the agent's `agent_config.json`:
 | --- | --- | --- |
 | `LLM_PROVIDER` | `ollama` | `ollama` or `groq` |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama address (Docker sets `http://ollama:11434`) |
-| `OLLAMA_MODEL` | `qwen3:8b` | Base model, until one is picked in the model switcher |
+| `OLLAMA_MODEL` | `qwen3:4b` | Base model, until one is picked in the model switcher |
+| `MAX_CONCURRENT_DIAGNOSES` | `2` | Diagnosis sessions admitted at once; additional sessions queue |
 | `OLLAMA_NUM_CTX` | `8192` | Context window |
 | `OLLAMA_TIMEOUT_SECONDS` | `600` | Per-call timeout |
 | `OLLAMA_KEEP_ALIVE` | `10m` (`.env.example`: `30m`) | How long the model stays in RAM (reloading costs 10-30 s) |
@@ -193,7 +200,7 @@ venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env          # then edit it as above, with OLLAMA_HOST=http://127.0.0.1:11434
 winget install Ollama.Ollama
-ollama pull qwen3:8b
+ollama pull qwen3:4b
 uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 

@@ -260,7 +260,7 @@ def test_a_diagnosis_can_start_from_checks_that_already_ran(monkeypatch, tmp_pat
 
     monkeypatch.setattr(planner, "collect_baseline", no_baseline)
     monkeypatch.setattr(planner, "learn_from", lambda session_id: asyncio.sleep(0))
-    monkeypatch.setattr(planner.learning_store, "learned_fixes_for", lambda issue, os_type: [])
+    monkeypatch.setattr(planner.learning_store, "learned_fixes_for", lambda issue, os_type, **kwargs: [])
     evidence = [("boot_performance", {}, {"ok": True, "summary": "Last start-up took 130 s", "data": {"last_boot_seconds": 130, "startup_programs": 3}})]
     asyncio.run(planner.run_diagnosis(session_id, "instant", preset_evidence=evidence))
     session = session_store.get_session(session_id)

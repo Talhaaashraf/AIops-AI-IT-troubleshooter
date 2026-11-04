@@ -230,7 +230,7 @@ def test_a_fix_cannot_resolve_a_problem_that_never_showed_up(monkeypatch):
     fix["result"] = {"ok": True, "summary": "DNS cache flushed"}
 
     async def fake_parallel(*args, **kwargs):
-        return []
+        return [("check_internet", {}, {"ok": True, "summary": "Network checks passed", "data": {}})]
 
     async def fake_chat(*args, **kwargs):
         return {"content": json.dumps({"resolved": True, "explanation": "Websites work now."})}
@@ -243,6 +243,7 @@ def test_a_fix_cannot_resolve_a_problem_that_never_showed_up(monkeypatch):
 
     verify = session_store.get_session(session_id)["verify"]
     assert verify["resolved"] is None and "cannot confirm" in verify["explanation"]
+    assert verify["method"] == "ai"  # tests complaint grounding independently of the incomplete-check guard
 
 
 def test_devices_cannot_choose_route_like_ids_or_markup_names(tmp_path, monkeypatch):

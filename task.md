@@ -4,10 +4,10 @@ AI-driven troubleshooting web app: the Ollama brain diagnoses PC software and ha
 thinking, suggests 3-4 ranked fixes, and **never changes anything on its own**: every action is approved
 by a person. Served from Docker behind nginx, published with ngrok.
 
-Status: `[ ]` todo · `[~]` in progress · `[x]` done and verified by the `aiops-reviewer` subagent.
+Status: `[ ]` todo · `[~]` implemented with verification outstanding · `[x]` verified as described in the relevant entry. Earlier phases used the `aiops-reviewer` subagent; later entries name their actual checks.
 Plan: see the approved plan (phases 0-6). Update this file as work lands.
 
-Deployed: phases 0-6 run in Docker (nginx on port 80; ngrok waits for NGROK_AUTHTOKEN). Phases 0-6 verified by the aiops-reviewer; the Phase 4 agent tools run on devices after the agent is reinstalled; the open [~] items need an ngrok token or the agent reinstall to verify.
+Historical deployment: phases 0-6 ran in Docker. Later phases below supersede their settings and verification status. As of the local review on 2026-11-04, server deployment and device versions have not been rechecked. See [the current project review](docs/09-sentinel-review-and-alignment.md).
 
 ## Phase 0: Tracking and review
 
@@ -175,7 +175,7 @@ are covered by mocked tests only; live removal on the server is the user's call.
 
 ### Push 3: learning hygiene
 
-- [ ] Recall: stemming, threshold, same OS and playbook, no container cases; no Modelfile MESSAGE examples
+- [~] Recall: common-inflection stemming, similarity threshold, same OS and playbook, container/ambiguous legacy-local exclusion, no global Modelfile lessons or MESSAGE examples. Implemented in the 2026-11-04 alignment pass; regression tests cover migration, recall, exports, and model-policy refresh. Real-model server evaluation remains outstanding.
 
 ### Push 4: Groq as an optional, clearly labelled cloud choice; docs
 
@@ -218,3 +218,12 @@ agent reinstall); I7 adds device tools (reinstall).
 - [~] I8: Fleet-wide correlation. `backend/fleet_correlation.py` groups recent learned cases by playbook across
   distinct devices; adds a 'seen on N devices' note to a diagnosis (FLEET_MIN_DEVICES=3) and `GET /api/fleet`.
   Shown on the report card, recorded in the decision log. Unit tests green (`tests/test_fleet.py`).
+
+## Alignment review (2026-11-04)
+
+- Reviewed the root task tracker, historical plans, reachable Git history, current backend paths, all 14 local decision JSON records, and local database/model metadata. The local database has no saved sessions, learned cases, tasks, or remediation audit rows; it does not establish the Ubuntu server's current state.
+- Implemented scoped learning and persistent target origin, excluded container cases from fleet counts, and kept historical records intact. Legacy local cases with unknown origin are retained but not learned from.
+- Removed globally embedded ticket examples and lessons; they remain available as eligible exports and selective recall. A build-policy fingerprint refreshes the old brain at startup when Ollama is available.
+- Verification now leaves missing/failed checks unconfirmed and accepts only actual JSON booleans from AI verification, preventing false successful outcomes from entering learning.
+- Aligned the Learning tab, README, model documentation, concurrency explanation, and historical-plan status with the current implementation.
+- Validation: 276 tests passed (baseline 256); the 10-scenario offline Instant evaluation passed all seven scoring checks. Browser rendering and real-model Fast/Deep evaluation remain outstanding. Full details are in [docs/09-sentinel-review-and-alignment.md](docs/09-sentinel-review-and-alignment.md). No live device actions or server deployment were performed by this review.

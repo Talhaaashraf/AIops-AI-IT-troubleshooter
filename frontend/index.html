@@ -170,7 +170,7 @@
           <div>
             <p class="kicker">Agentic AI · automated diagnosis</p>
             <h1>What's the issue?</h1>
-            <p class="subheading">Describe the problem. The AI runs diagnostics on the selected device, thinks it through and suggests 3-4 ranked solutions. <strong>Nothing changes on the device until you approve a solution.</strong> It learns from every ticket.</p>
+            <p class="subheading">Describe the problem. The AI runs diagnostics on the selected device, weighs the evidence and suggests 3-4 ranked solutions. <strong>Nothing changes on the device until you approve a solution.</strong> Relevant verified tickets help guide future diagnoses.</p>
           </div>
           <span id="ai-model-label" class="soft-label">AI: checking...</span>
         </header>
@@ -494,9 +494,9 @@
       <section id="learning" class="tab">
         <header class="page-heading">
           <div>
-            <p class="kicker">Self-improving AI</p>
+            <p class="kicker">Verified troubleshooting memory</p>
             <h1>Learning</h1>
-            <p class="subheading">Every finished ticket becomes a learned case. Verified fixes and your 👍 / 👎 feedback are distilled into the <code id="learn-model-name">aiops-brain</code> model, so the agent gets better with every issue it resolves.</p>
+            <p class="subheading">Verified outcomes and your corrections help <code id="learn-model-name">aiops-brain</code> recall relevant tickets from the same operating system and problem type. Container checks are excluded. Rebuilding refreshes instructions and exports lessons; it does not retrain the model. Every fix still needs your approval.</p>
           </div>
           <div class="button-row">
             <a id="learn-dataset" class="ghost-button" href="/api/learning/dataset">Export training data</a>
@@ -505,7 +505,7 @@
         </header>
 
         <div class="metric-grid status-grid">
-          <article class="metric-card"><div class="metric-head"><span>Cases learned</span></div><div class="metric-number" id="learn-total">--</div><p id="learn-trusted">--</p></article>
+          <article class="metric-card"><div class="metric-head"><span>Cases recorded</span></div><div class="metric-number" id="learn-total">--</div><p id="learn-trusted">--</p></article>
           <article class="metric-card"><div class="metric-head"><span>Resolution rate</span></div><div class="metric-number" id="learn-rate">--</div><p id="learn-outcomes">--</p></article>
           <article class="metric-card"><div class="metric-head"><span>Model version</span></div><div class="metric-number" id="learn-version">--</div><p id="learn-model-detail">--</p></article>
         </div>

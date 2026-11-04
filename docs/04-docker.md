@@ -48,7 +48,7 @@ Free ngrok URLs change every time ngrok restarts. Devices installed with an old 
 - **Speed.**
   - `ollama` runs with `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1` and flash attention, the best settings for a CPU.
   - The app preloads the model at startup, and `OLLAMA_KEEP_ALIVE` (default `30m`) keeps it in RAM between calls.
-  - AI calls run one at a time, so a second diagnosis waits for the first.
+  - Up to two diagnosis sessions run together (`MAX_CONCURRENT_DIAGNOSES=2`), with further sessions queued. Their diagnostic checks can overlap; model calls still run one at a time by default (`OLLAMA_MAX_PARALLEL=1`).
 - **Where the time goes.** Each AI call logs its token counts and durations, for example `Ollama aiops-brain: prompt 801 tok in 8.8s, output 72 tok in 13.4s`. See them with `docker compose logs sentinel | grep ollama_provider`.
 - **Decisions.** `decisions/<date>/` holds one JSON file per AI decision or approval, plus a daily `index.md`. It holds device data and is git-ignored.
 - **Logs:** `docker compose logs -f sentinel`

@@ -7,7 +7,9 @@ for the question, verify fixes, and learn — **without** redesigning the app, r
 the architecture, adding a second AI framework, requiring a GPU or a bigger model, or
 weakening the suggest-only safety model.
 
-This is a **plan for review**. Nothing here is implemented yet. Status legend:
+This is the original design plan, retained as a historical reference. I1-I8 now have implementations;
+`task.md` tracks the remaining server and agent verification. See [the current review](09-sentinel-review-and-alignment.md).
+The unchecked items below describe the original plan, not today's implementation status. Status legend:
 `[ ]` planned · `[~]` in progress · `[x]` done and verified.
 
 ---

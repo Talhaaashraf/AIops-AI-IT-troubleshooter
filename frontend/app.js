@@ -2757,7 +2757,7 @@ async function loadLearning() {
     const model = stats.model || {};
     setText('learn-count', stats.total_cases || '');
     setText('learn-total', stats.total_cases);
-    setText('learn-trusted', `${stats.trusted_cases} trusted (verified or confirmed by you)`);
+    setText('learn-trusted', `${stats.trusted_cases} trusted device cases (verified or corrected/confirmed by you)`);
     setText('learn-rate', `${Math.round((stats.resolution_rate || 0) * 100)}%`);
     setText('learn-outcomes', Object.entries(stats.outcomes || {}).map(([key, value]) => `${value} ${key.replace('_', ' ')}`).join(' · ') || 'No outcomes yet');
     setText('learn-version', model.version ? `v${model.version}` : 'not built');

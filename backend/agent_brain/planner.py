@@ -929,7 +929,7 @@ async def _diagnose(session, target, mode, preset_evidence=None):
     _record_findings(session_id, found)
     evidence_seconds = time.perf_counter() - started
 
-    learned_fixes = await asyncio.to_thread(learning_store.learned_fixes_for, issue, target.os_type)
+    learned_fixes = await asyncio.to_thread(learning_store.learned_fixes_for, issue, target.os_type, playbook_id=(playbook or {}).get("id"))
     if mode == "instant":
         report, similar = _rule_based_report(found, issue, target.os_type, note, playbook), []
     else:
@@ -978,7 +978,7 @@ def _recent_alert_lines(alerts, limit=3):
 async def _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up):
     alerts = get_alerts(10, "local-server" if target.is_local else target.device_id)
     alert_lines = "\n".join(f"- [{alert['severity']}] {alert['category']}: {alert['description']}" for alert in alerts) or "- none"
-    similar = await asyncio.to_thread(learning_store.find_similar, issue, target.os_type, 3)
+    similar = await asyncio.to_thread(learning_store.find_similar, issue, target.os_type, 3, playbook_id=(playbook or {}).get("id"))
     if similar:
         _think(session_id, f"Memory: found {len(similar)} similar ticket(s) solved before; using them as hints.")
     past_cases = _past_cases_block(similar)
@@ -1470,7 +1470,15 @@ async def _verify(session, target, report, fix):
     evidence = await _run_parallel(session_id, target, [(tool_id, args or {}) for tool_id, args in tool_ids[:4]], kind="verify")
     rerun = {tool_id for tool_id, _, _ in evidence}
 
-    if related and sources <= rerun:
+    if not evidence or any(not result.get("ok") for _, _, result in evidence) or (related and not sources <= rerun):
+        # Missing/failed checks produce no findings, which is not proof that the problem disappeared.
+        verdict = {
+            "resolved": None,
+            "explanation": "The fix ran, but the verification checks were incomplete or failed. AIops cannot confirm the problem is resolved.",
+            "next_steps": ["Restore access to the device and re-run the diagnostic checks."],
+            "after_fix": fix["tool_id"], "method": "none",
+        }
+    elif related and sources <= rerun:
         # Deterministic verdict, no AI call: did the problems this fix targeted disappear?
         after = {item["key"]: item for item in findings.analyze(evidence, target.os_type)}
         remaining = [after[item["key"]] for item in related if item["key"] in after]
@@ -1488,7 +1496,8 @@ async def _verify(session, target, report, fix):
                 {"role": "user", "content": f"Problem: {session['issue']}\nOriginal root cause: {report['root_cause']}\nFix applied: {fix['tool_id']} -> {fix['result'].get('summary')}\n\nFresh evidence:\n{_evidence_block(evidence, REPORT_EVIDENCE_CHARS)}"},
             ], json_mode=True, max_tokens=VERIFY_MAX_TOKENS, think=False)
             raw = _parse_json(reply["content"])
-            verdict = {"resolved": bool(raw.get("resolved")), "explanation": str(raw.get("explanation", ""))[:1500], "next_steps": [str(item) for item in raw.get("next_steps", [])][:8], "after_fix": fix["tool_id"], "method": "ai"}
+            resolved = raw.get("resolved") if type(raw.get("resolved")) is bool else None
+            verdict = {"resolved": resolved, "explanation": str(raw.get("explanation", ""))[:1500], "next_steps": [str(item) for item in raw.get("next_steps", [])][:8], "after_fix": fix["tool_id"], "method": "ai"}
         except LLMUnavailableError as error:
             verdict = {"resolved": None, "explanation": f"Fix applied, but the AI could not verify it: {error}", "next_steps": [], "after_fix": fix["tool_id"], "method": "none"}
     separate = set(report.get("other_findings") or [])
