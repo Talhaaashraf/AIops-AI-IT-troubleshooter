@@ -12,7 +12,7 @@
 | 6. UI | "What's the issue?" tab with a live step feed and fix buttons; "Add Agent" tab with copyable commands. | `frontend/` |
 | Docker | Compose stack with `ollama`, `model-init` and `sentinel`. | `Dockerfile`, `docker-compose.yml` |
 | Model folder | The base model is migrated into `models/qwen2.5-3b/` (GGUF, Modelfile, LICENSE). | `models/migrate_model.py` |
-| Self-improving model | Learned-case memory, feedback, and the `sentinel-tech` model rebuilt from lessons. | `backend/learning/`, `models/sentinel-tech/` |
+| Historical learning model (superseded) | Earlier learned-case memory and `sentinel-tech` experiments; the current `aiops-brain` uses troubleshooting instructions and scoped retrieval of trusted cases, not weight retraining. | `backend/learning/`, `docs/05-self-improving-model.md` |
 | UI redesign | New design system with light/dark theme, ring gauges, icon sidebar, AI status chip, Learning tab, and feedback buttons. | `frontend/` |
 
 ## Safety design

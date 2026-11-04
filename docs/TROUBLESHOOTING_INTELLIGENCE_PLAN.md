@@ -65,6 +65,8 @@ it is missing *depth of reasoning* and *structured domain knowledge*.
 
 ## 2. What is missing (the gaps to close)
 
+This section is the gap assessment from the original plan, before phases I1-I8 were implemented. It is retained as design history, not a description of current missing functionality. See [the implementation status below](#6-implementation-phases) and [`task.md`](../task.md) for current code and outstanding verification.
+
 Grouped by the spec sections they come from:
 
 1. **Explicit reasoning structure** (spec §3–5, §36, §52):
@@ -92,10 +94,11 @@ Grouped by the spec sections they come from:
 8. **Evaluation of reasoning** (spec §49): eval scores the final text (cause, confidence,
    first solution, OS-appropriate steps), not tool selection, hypothesis ranking,
    hallucination resistance, or unknown-handling.
-9. **New evidence sources** some scenarios need (spec §12, §16, §21): no generic TCP-port
-   test (printer 9100/515/631), no full driver inventory with versions/signatures, no
-   bugcheck-code extraction, no AD/Entra tools. These require **agent/toolkit changes and
-   a device reinstall**, so they are isolated into their own late phase.
+9. **New evidence sources** some scenarios need (spec §12, §16, §21): at the time of this
+   assessment, there was no generic TCP-port test (printer 9100/515/631), driver inventory,
+   or code extraction. I3 added code/Event-ID/bugcheck retrieval from issue text and evidence;
+   I7 later added the TCP-port and driver-inventory tools (toolkit 1.8.0; agent reinstall
+   required). AD/Entra live diagnostics remain out of scope.
 
 ---
 
@@ -353,7 +356,7 @@ ticked, matching the project's existing workflow.
 - **§10–11 performance/hardware "find the bottleneck", don't jump to cleanup / "RAM faulty"**
   → already partly in `findings.py` (disk-vs-RAM grounding, correlate WHEA before blaming
   RAM); domain cards make the bottleneck reasoning explicit.
-- **§12 BSOD** → `bugchecks.py` + correlation rules (I3), deeper with I7 bugcheck extraction.
+- **§12 BSOD** → `bugchecks.py` scans crash text and evidence (I3); I7 did not add a separate bugcheck-extraction tool.
 - **§13 Event logs** → `event_ids.py` + existing `event_log_errors`/`recent_crashes` (I3).
 - **§25–26 error/Event-ID engines** → I3.
 - **§27 playbook engine** → I4.
