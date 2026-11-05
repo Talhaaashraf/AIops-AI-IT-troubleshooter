@@ -590,7 +590,16 @@ select.field-input { cursor: pointer; }
 
 /* ---------- Performance tab ---------- */
 .perf-status { flex: 1; margin: 0 0 6px; }
-.perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start; gap: 14px; margin-top: 14px; }
+.perf-grid { display: grid; grid-template-columns: 1fr; align-items: start; gap: 14px; margin-top: 14px; }
+.workbench-rows { display: grid; gap: 10px; margin: 16px 0; }
+.workbench-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.workbench-row pre { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; }
+.workbench-row details { margin-top: 8px; }
+#hardware-camera { max-width: 100%; width: 480px; margin-top: 12px; }
+#display-test { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; text-align: center; color: #777; cursor: pointer; padding: 25px; }
+#display-test.hidden { display: none; }
+#vt-result { overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 680px) { .workbench-row { grid-template-columns: minmax(0, 1fr) auto; } .workbench-row > div { grid-column: 1 / -1; } }
 .perf-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .perf-card.ok { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
 .perf-card.warning { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }

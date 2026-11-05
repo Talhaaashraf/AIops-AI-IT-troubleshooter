@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.toolkit import TOOLKIT_VERSION, describe_tools, get_tool
 
-from . import decision_log, fleet_correlation, health_report, public_url, server_identity, software_store, task_queue, task_signals, threat_rules, threat_store
+from . import decision_log, fleet_correlation, health_report, public_url, server_identity, software_store, task_queue, task_signals, threat_rules, threat_store, virustotal
 from .agent_brain import events as troubleshoot_events
 from .agent_brain import findings as rule_findings
 from .agent_brain import session_store
@@ -32,7 +32,7 @@ from .learning import model_builder
 from .learning import store as learning_store
 from .llm import catalog as llm_catalog
 from .llm import get_provider as get_llm_provider
-from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, explain_threats, is_ai_available, review_leftovers, threat_chat
+from .ai_technician import AIModelUnavailableError, AIUnavailableError, ai_status, chat, diagnose, diagnose_logs, explain_threats, is_ai_available, normalize_chat_history, review_leftovers, threat_chat
 from .alert_store import add_alert, get_alerts
 from .auth import SESSION_COOKIE_NAME, auth_enabled, check_password, has_valid_session, is_public_path, session_token
 from .collectors import collect_report
@@ -51,6 +51,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="AIops Device Health Monitor", lifespan=lifespan)
+app.include_router(virustotal.router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -575,6 +576,9 @@ def _change_in_progress(device_id):
     """What is changing this device right now (a Software/Performance job or an approved fix), or None.
     The agent runs changes one at a time: a second one would wait behind the first, and the server could
     report it as failed while the agent still runs it later."""
+    for job in list(performance_jobs.values()):
+        if job["device_id"] == device_id and job["state"] == "running" and job.get("risk", "read") != "read":
+            return "hardware load test"
     for job in list(software_jobs.values()):
         if job["device_id"] == device_id and job["state"] == "running" and job.get("risk", "read") != "read":
             return f"{job['action']} of {job['name']}"
@@ -1110,6 +1114,8 @@ PERFORMANCE_PHASES = (
     (("benchmark", "performance_benchmark", {}),),
     (("os_updates", "os_updates", {}), ("apps", "installed_software", {"check_updates": True}), ("boot", "boot_performance", {}),
      ("hardware", "hardware_health", {}), ("disks", "disk_health", {}), ("battery", "battery_health", {}), ("input", "input_devices", {})),
+    (("cpu", "component_observation", {"component": "cpu"}), ("ram", "component_observation", {"component": "ram"}),
+     ("power", "component_observation", {"component": "power"}), ("peripherals", "component_observation", {"component": "peripherals"})),
 )
 # Keyboard and mouse status is shown, but it has nothing to do with speed, so the AI analysis leaves it out.
 ANALYSIS_SKIPPED_SECTIONS = {"input"}
@@ -1139,7 +1145,7 @@ async def _run_performance_check(job, target, section, tool_id, args):
         return
     entry["state"] = "running"
     try:
-        result = await execute(target, tool_id, args, "read")
+        result = await execute(target, tool_id, args, job.get("risk", "read"))
     except Exception as error:  # one broken check must not stop the others
         logger.exception("Performance check %s failed", tool_id)
         result = {"ok": False, "summary": f"{tool_id} failed: {error}"}
@@ -1152,14 +1158,16 @@ async def _run_performance_check(job, target, section, tool_id, args):
     elif ok and tool_id == "os_updates" and isinstance(data, dict) and _image_managed(target):
         data = {**data, "can_install": False, "install_note": IMAGE_MANAGED_NOTE}
     entry.update(state="done" if ok else "failed", ok=ok, summary=summary, data=data, duration_ms=result.get("duration_ms"))
+    if tool_id == "bounded_stress":
+        _record_ai("software_action", target.device_id, False, {"action": tool_id, "state": "completed", "result": summary, "ok": ok}, used_ai=False)
     # Instant rule findings (milliseconds) so each card can show what is wrong while the rest still runs.
     evidence = [(item["tool_id"], item["args"], {"ok": item["ok"], "summary": item["summary"], "data": item["data"]}) for item in list(job["sections"].values()) if item["state"] == "done"]
     job["findings"] = [{key: item[key] for key in ("key", "severity", "title", "detail", "source")} for item in rule_findings.analyze(evidence, target.os_type)]
 
 
-async def _run_performance_job(job, target):
+async def _run_performance_job(job, target, phases=None):
     try:
-        for phase in PERFORMANCE_PHASES:
+        for phase in phases or PERFORMANCE_PHASES:
             await asyncio.gather(*(_run_performance_check(job, target, section, tool_id, args) for section, tool_id, args in phase))
     except Exception:
         logger.exception("Performance test %s failed", job["job_id"])
@@ -1181,23 +1189,42 @@ def _performance_target(device_id):
 
 
 @app.post("/api/agents/{device_id}/performance/test")
-async def start_performance_test(device_id: str):
+async def start_performance_test(device_id: str, payload: dict | None = None):
     """Run every read-only performance, hardware and update check on the device. Nothing is changed."""
     target = _performance_target(device_id)
+    payload = payload or {}
+    section = payload.get("section")
+    checks = {entry[0]: entry for phase in PERFORMANCE_PHASES for entry in phase}
+    checks["security"] = ("security", "security_snapshot", {})
+    stress = section in ("stress_cpu", "stress_ram", "stress_storage")
+    if stress:
+        if payload.get("approved") is not True:
+            raise HTTPException(400, detail="Approve the bounded load test first")
+        checks[section] = (section, "bounded_stress", {"component": section.removeprefix("stress_"), "approved": True})
+    if section is not None and section not in checks:
+        raise HTTPException(400, detail="Unknown test section")
+    phases = ((checks[section],),) if section else PERFORMANCE_PHASES
     running = next((job for job in list(performance_jobs.values()) if job["device_id"] == target.device_id and job["state"] == "running"), None)
     if running:
-        return running
+        if not section and not running.get("requested_section"):
+            return running
+        raise HTTPException(409, detail="Wait for the current device test to finish")
     if not target.is_local and target.status != "online":
         # Its checks would only time out one by one (minutes) while nobody picks them up.
         raise HTTPException(status_code=409, detail=f"{target.label} is offline: start the device (its agent connects by itself), then run the test")
+    if stress and _change_in_progress(target.device_id):
+        raise HTTPException(409, detail="Wait for the current device change to finish")
     finished = [job_id for job_id, job in list(performance_jobs.items()) if job["state"] != "running"]
     for job_id in finished[: max(0, len(performance_jobs) - PERFORMANCE_JOBS_KEPT + 1)]:
         performance_jobs.pop(job_id, None)
-    sections = {section: {"tool_id": tool_id, "args": args, "state": "queued", "ok": None, "summary": None, "data": None} for phase in PERFORMANCE_PHASES for section, tool_id, args in phase}
+    sections = {name: {"tool_id": tool_id, "args": args, "state": "queued", "ok": None, "summary": None, "data": None} for phase in phases for name, tool_id, args in phase}
     job = {"job_id": secrets.token_hex(8), "device_id": target.device_id, "device": target.label, "os_type": target.os_type, "state": "running",
-           "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None, "sections": sections, "findings": [], "analysis_session_id": None}
+           "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None, "sections": sections, "findings": [], "analysis_session_id": None,
+           "requested_section": section, "risk": "medium" if stress else "read"}
+    if stress:
+        _record_ai("software_action", target.device_id, False, {"action": "bounded_stress", "state": "approved", "component": checks[section][2]["component"], "approved_by": "dashboard user"}, used_ai=False)
     performance_jobs[job["job_id"]] = job
-    _spawn(_run_performance_job(job, target))
+    _spawn(_run_performance_job(job, target, phases))
     return job
 
 
@@ -1228,6 +1255,8 @@ async def analyse_performance_test(device_id: str, payload: dict):
         raise HTTPException(status_code=404, detail="Run the full test first")
     if job["state"] == "running":
         raise HTTPException(status_code=409, detail="Wait for the full test to finish")
+    if job.get("requested_section"):
+        raise HTTPException(400, detail="Run a full performance test before requesting full-device analysis")
     previous = session_store.get_session(job["analysis_session_id"], include_steps=False) if job.get("analysis_session_id") else None
     if previous and previous["status"] in ("queued", "running"):
         return {"session_id": previous["session_id"], "status": previous["status"], "device": target.label, "mode": None}
@@ -1406,6 +1435,10 @@ def agent_chat(payload: dict):
     message = str(payload.get("message", "")).strip()
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
+    if len(message) > 8000:
+        raise HTTPException(status_code=400, detail="Please keep the question under 8000 characters")
+    if "conversation_history" in payload and not isinstance(payload["conversation_history"], list):
+        raise HTTPException(status_code=400, detail="conversation_history must be a list")
 
     # Chat about a chosen device. "This server" is the host's agent once it is installed; until then, in
     # Docker, it is only the container.
@@ -1415,20 +1448,40 @@ def agent_chat(payload: dict):
         device_id = server["device_id"]
     report = None
     if device_id and device_id not in (LOCAL_DEVICE_ID, "local-server"):
+        device = get_device(device_id)
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
         latest = get_latest_report(device_id)
-        if not latest:
-            raise HTTPException(status_code=404, detail="This device has not reported any data yet")
-        report = latest["diagnostics"]
-    session_id = f"{payload.get('session_id', 'default')}:{device_id or LOCAL_DEVICE_ID}"
-    history = chat_sessions.setdefault(session_id, [])
+        report = latest.get("diagnostics") if latest else None
+        received_at = latest.get("timestamp") if latest else None
+        age = server_identity._age_seconds(received_at)
+        context = {"source": "agent", "device_id": device_id, "status": device.get("status"),
+                   "received_at": received_at, "age_seconds": round(age) if age is not None else None,
+                   "stale": age is None or age > server_identity.STALE_SECONDS or device.get("status") != "online",
+                   "has_snapshot": bool(report), "os_type": device.get("os_type")}
+    else:
+        device_id = LOCAL_DEVICE_ID
+        report = collect_report()
+        context = {"source": "container" if server_identity.in_docker() else "local",
+                   "device_id": device_id, "received_at": datetime.now(timezone.utc).isoformat(),
+                   "status": "online", "stale": False, "has_snapshot": bool(report)}
+    # The browser owns its history. Legacy callers can instead reuse an opaque session id;
+    # never let unrelated tabs/users silently share a device's "default" conversation.
+    session_id = str(payload.get("session_id") or secrets.token_urlsafe(24))
+    if len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="session_id is too long")
+    session_key = ("technician", device_id, session_id)
+    client_history = "conversation_history" in payload
+    history = normalize_chat_history(payload["conversation_history"] if client_history else chat_sessions.get(session_key, []))
     try:
         think = bool(payload.get("think"))
-        reply = chat(message, report or payload.get("diagnostics") or collect_report(), history, think=think)
-        history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply.get("plain_explanation", "")}])
-        chat_sessions[session_id] = history[-6:]
+        reply = chat(message, report, history, think=think, context=context)
+        if not client_history:
+            history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
+            chat_sessions[session_key] = normalize_chat_history(history)
         _record_ai("chat_answer", device_id or LOCAL_DEVICE_ID, think, {"question": message[:500], "summary": reply.get("plain_explanation"),
-                   "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations")})
-        return {"reply": reply, "session_id": session_id}
+                   "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations"), "device_context": context})
+        return {"reply": reply, "session_id": session_id, "device_context": context}
     except AIModelUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AIUnavailableError as error:

@@ -21,9 +21,22 @@ LOG_SYSTEM_PROMPT = (
     "first, then give the technical detail, then concrete remediation steps. If the logs show "
     "no meaningful problem, say so plainly. " + BRAIN_PRINCIPLES + " Return valid JSON only."
 )
-CHAT_SYSTEM_PROMPT = DIAGNOSIS_SYSTEM_PROMPT + (
-    " Answer about the device in current_diagnostics: quote the numbers you used (e.g. memory 93%, Chrome 1.1 GB), and say so"
-    " when the data does not show the problem. Return valid JSON with plain_explanation, technical_root_cause, and recommendations fields.")
+CHAT_SYSTEM_PROMPT = (
+    "You are a helpful IT technician having a conversation. Answer the user's actual question directly, "
+    "using the conversation for follow-ups such as 'how do I do step 2?'. Always reply in English. "
+    "A greeting or general question needs a direct answer, "
+    "not a device diagnosis. Use device_snapshot only when relevant; quote measurements supporting a device claim. "
+    "device_context describes its source and freshness: stale/offline data is historical, never live proof. "
+    "Missing data means unknown, not healthy or faulty. A container snapshot describes only the container, "
+    "not its host PC. Reference guidance is general knowledge, not evidence that a fault exists on this device. "
+    "If the cause is unclear, explain what is known and ask one or two specific questions before guessing. "
+    "You cannot browse, inspect files, run checks or execute fixes in this chat. Never claim you did; "
+    "ask for an error message or suggest a relevant check in Performance or Troubleshoot when needed. "
+    + BRAIN_PRINCIPLES +
+    ' Return only JSON: {"plain_explanation": "direct answer", "technical_root_cause": "", '
+    '"recommendations": []}. Leave technical_root_cause empty unless a technical explanation is relevant. '
+    "Recommendations are optional; do not add fixes to an unrelated question. Keep the answer concise."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +45,9 @@ logger = logging.getLogger(__name__)
 # summary take many minutes and stalled every other AI call behind it, so prompts get a digest
 # and answers get a length cap.
 SUMMARY_MAX_TOKENS = 400
+CHAT_MAX_TOKENS = 700
+CHAT_HISTORY_MESSAGES = 6
+CHAT_HISTORY_CHARS = 6000
 # The detailed report explains every detected issue, so it gets more room (~2.5 min on a laptop CPU).
 REPORT_MAX_TOKENS = 700
 MAX_REPORT_ISSUES = 6
@@ -260,24 +276,58 @@ def _parse_chat_reply(raw):
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         result = _loads_lenient(text)
+        if not isinstance(result, dict):
+            raise ValueError("Chat reply must be an object")
     except (TypeError, ValueError):
         return {
             "plain_explanation": raw,
-            "technical_root_cause": "The technician returned an unstructured response.",
+            "technical_root_cause": "",
             "recommendations": [],
         }
     return {
         "plain_explanation": str(result.get("plain_explanation", result.get("summary", "No plain-language explanation returned."))),
-        "technical_root_cause": str(result.get("technical_root_cause", result.get("root_cause", "Unknown"))),
+        "technical_root_cause": str(result.get("technical_root_cause") or result.get("root_cause") or ""),
         "recommendations": _as_list(result.get("recommendations", result.get("steps"))),
     }
 
 
-def chat(message, report, conversation_history, think=False):
+def normalize_chat_history(history):
+    """Bound client/server history and retain the steps a follow-up can refer to."""
+    if not isinstance(history, list):
+        return []
+    kept = []
+    remaining = CHAT_HISTORY_CHARS
+    for item in reversed(history[-CHAT_HISTORY_MESSAGES:]):
+        if not isinstance(item, dict) or item.get("role") not in ("user", "assistant"):
+            continue
+        content = item.get("content")
+        if item["role"] == "assistant" and isinstance(content, dict):
+            content = json.dumps({key: content[key] for key in (
+                "plain_explanation", "technical_root_cause", "recommendations"
+            ) if key in content}, ensure_ascii=False)
+        if not isinstance(content, str) or not content.strip():
+            continue
+        content = content[:min(2000, remaining)]
+        kept.append({"role": item["role"], "content": content})
+        remaining -= len(content)
+        if remaining <= 0:
+            break
+    return list(reversed(kept))
+
+
+def chat(message, report, conversation_history, think=False, context=None):
+    from .agent_brain.knowledge import retrieve, retrieve_codes
+
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
-    messages.extend({"role": item["role"], "content": str(item.get("content", ""))} for item in conversation_history[-6:])
-    messages.append({"role": "user", "content": json.dumps({"question": message, "current_diagnostics": compact_report(report)}, default=str)})
-    return _parse_chat_reply(_completion(messages, think=think))
+    messages.extend(normalize_chat_history(conversation_history))
+    guidance = "\n".join(filter(None, [retrieve(message, mode="fast"), retrieve_codes(message)]))
+    messages.append({"role": "user", "content": json.dumps({
+        "question": message,
+        "device_context": context or {"source": "unknown", "stale": True},
+        "device_snapshot": compact_report(report) if report else None,
+        "reference_guidance": guidance,
+    }, default=str, ensure_ascii=False)})
+    return _parse_chat_reply(_completion(messages, max_tokens=CHAT_MAX_TOKENS, think=think))
 
 
 LEFTOVER_PROMPT = (
@@ -322,7 +372,7 @@ THREAT_PROMPT = (
     "downloaded, not an infection; say so when it fits. " + BRAIN_PRINCIPLES + " Return valid JSON only."
 )
 THREAT_CHAT_RULES = (
-    " You are the dashboard's action chat. Answer in the language of the question (English or Roman Urdu), in a few sentences. "
+    " You are the dashboard's action chat. Answer only in English, in a few sentences. "
     "When the person asks to do something to a finding, set finding_id and action to it, but only an action that finding lists "
     "as approvable; the dashboard then shows an approval card and nothing runs until the person approves it. Never say an "
     "action was done or started. If they ask for something that is not approvable, set action to none and say how to do it by "

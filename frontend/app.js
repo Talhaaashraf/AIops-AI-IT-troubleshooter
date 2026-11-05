@@ -28,6 +28,8 @@ let latestReport = null;
 let socket = null;
 let reconnectTimer = null;
 let chatHistory = [];
+let chatDeviceId = null;
+let chatBusy = false;
 let generatedToken = '';
 let selectedPlatform = 'windows';
 
@@ -156,16 +158,19 @@ async function loadHealth() {
 // Alerts
 // ============================================================================
 
-function renderDiagnosis(container, data) {
+function renderDiagnosis(container, data, isChat = false) {
   container.replaceChildren();
 
   const summary = document.createElement('strong');
   summary.textContent = data.summary || data.plain_explanation || 'No summary returned.';
   container.appendChild(summary);
 
-  const root = document.createElement('p');
-  root.textContent = `Likely root cause: ${data.root_cause || data.technical_root_cause || 'Unknown'}`;
-  container.appendChild(root);
+  const detail = data.root_cause || data.technical_root_cause;
+  if (detail || !isChat) {
+    const root = document.createElement('p');
+    root.textContent = isChat ? detail : `Likely root cause: ${detail || 'Unknown'}`;
+    container.appendChild(root);
+  }
 
   const list = document.createElement('ul');
   (data.steps || data.recommendations || []).forEach((step) => {
@@ -419,6 +424,7 @@ function renderPerfFindings(job) {
 
 function renderPerfAi(job) {
   const panel = $('perf-ai');
+  if (job?.requested_section) { panel.classList.add('hidden'); return; }
   if (!job) {
     panel.classList.add('hidden');
     return;
@@ -514,9 +520,10 @@ function renderPerformanceJob() {
   const end = job.finished_at ? new Date(job.finished_at).getTime() : Date.now();
   const elapsed = Math.max(0, Math.round((end - new Date(job.started_at).getTime()) / 1000));
   const problems = (job.findings || []).length;
+  const incomplete = sections.filter((section) => section.state === 'failed' || section.state === 'skipped').length;
   setPerfStatus(running
     ? `Testing ${job.device}: ${finished} of ${sections.length} checks done (${elapsed}s; about 1-3 min, the update search is the slowest)...`
-    : `Tested ${job.device} on ${new Date(job.finished_at || job.started_at).toLocaleString()} in ${elapsed}s: ${problems ? `${problems} problem${problems === 1 ? '' : 's'} found` : 'no problems found by the rules'}.`);
+    : `Checks finished on ${job.device} at ${new Date(job.finished_at || job.started_at).toLocaleString()} in ${elapsed}s: ${problems} rule finding(s), ${incomplete} failed or unavailable check(s). Collected evidence is not a full hardware certification.`);
   renderPerfFindings(job);
   $('perf-sections').innerHTML = PERF_SECTIONS.map((meta) => perfCard(meta, job.sections?.[meta.id], job)).join('');
   renderPerfUpdates(job);
@@ -1149,33 +1156,49 @@ function addChatMessage(text, role) {
   const message = document.createElement('div');
   message.className = `chat-message ${role}`;
   if (role === 'assistant' && text && typeof text === 'object') {
-    renderDiagnosis(message, text);
+    renderDiagnosis(message, text, true);
   } else {
     message.textContent = String(text);
   }
   $('chat-messages').appendChild(message);
   $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+  return message;
 }
 
-function renderChatContext(report) {
+function renderChatContext(report, timestamp = null) {
   const disk = (report?.disk || []).reduce((max, item) => Math.max(max, item.usage_percent || 0), 0);
   setText('chat-host', report?.system?.hostname || '--');
   setText('chat-cpu', percent(report?.cpu?.total_usage_percent));
   setText('chat-ram', percent(report?.memory?.ram?.usage_percent));
   setText('chat-disk', report ? percent(disk) : '--');
+  const receivedAt = timestamp || report?.source?.received_at;
+  const age = receivedAt ? Date.now() - Date.parse(receivedAt) : NaN;
+  const stale = report?.source?.stale || !Number.isFinite(age) || age > 60000;
+  setText('chat-context-status', !report ? 'No device snapshot available.' : receivedAt
+    ? `${stale ? 'Historical snapshot' : 'Latest snapshot'}: ${new Date(receivedAt).toLocaleString()}`
+    : 'Snapshot time unavailable.');
+}
+
+function resetTechnicianChat(deviceId) {
+  if (chatDeviceId === deviceId) return;
+  chatDeviceId = deviceId;
+  chatHistory = [];
+  $('chat-messages').replaceChildren();
+  addChatMessage('Ask an IT question or describe a problem with the selected device. All answers are in English.', 'assistant');
 }
 
 async function loadChatDevice() {
-  const deviceId = await fillDeviceSelect($('chat-device'), () => { chatHistory = []; loadChatDevice(); });
+  const deviceId = await fillDeviceSelect($('chat-device'), () => { resetTechnicianChat($('chat-device').value); loadChatDevice(); });
+  resetTechnicianChat(deviceId);
   if (deviceId === 'local') {
-    if (latestReport) renderChatContext(latestReport);
+    renderChatContext(latestReport);
     return;
   }
   try {
     const snapshot = await fetch(`/api/agents/${deviceId}/diagnostics`).then((response) => response.json());
-    renderChatContext(snapshot.diagnostics);
+    if (chatDeviceId === deviceId) renderChatContext(snapshot.diagnostics, snapshot.timestamp);
   } catch (_error) {
-    renderChatContext(null);
+    if (chatDeviceId === deviceId) renderChatContext(null);
   }
 }
 
@@ -1183,26 +1206,38 @@ async function sendChat(event) {
   event.preventDefault();
   const input = $('chat-input');
   const message = input.value.trim();
-  if (!message) return;
+  if (!message || chatBusy) return;
 
+  const deviceId = $('chat-device').value || 'local';
+  const submit = $('chat-form').querySelector('button[type="submit"]');
+  chatBusy = true;
+  submit.disabled = true;
+  $('chat-device').disabled = true;
   input.value = '';
   addChatMessage(message, 'user');
+  const pending = addChatMessage('Preparing an answer...', 'assistant');
+  pending.setAttribute('role', 'status');
 
   try {
-    const deviceId = $('chat-device').value || 'local';
     const response = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, device_id: deviceId, think: Boolean($('chat-think')?.checked), diagnostics: deviceId === 'local' ? latestReport : null, conversation_history: chatHistory }),
+      body: JSON.stringify({ message, device_id: deviceId, think: Boolean($('chat-think')?.checked), conversation_history: chatHistory }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `Chat request failed (${response.status})`);
+    if (deviceId !== ($('chat-device').value || 'local')) return;
     addChatMessage(data.reply, 'assistant');
     chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: data.reply });
     chatHistory = chatHistory.slice(-6);
   } catch (error) {
     console.error('Chat request failed:', error);
-    addChatMessage(friendlyError(error), 'assistant');
+    if (deviceId === ($('chat-device').value || 'local')) addChatMessage(friendlyError(error), 'assistant');
+  } finally {
+    pending.remove();
+    chatBusy = false;
+    submit.disabled = false;
+    $('chat-device').disabled = false;
   }
 }
 
@@ -2933,7 +2968,7 @@ let threatFilter = null;
 let threatPollTimer = null;
 let threatPendingCard = null;
 const threatProposals = [];
-const THREAT_CHAT_HELLO = 'Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "T1 ko rescan karo". I show an approval card: nothing runs until you approve it.';
+const THREAT_CHAT_HELLO = 'Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "rescan T1". I show an approval card: nothing runs until you approve it.';
 const THREAT_STATUS = { active: 'Open', neutralised: 'Removed', acknowledged: 'Acknowledged', false_positive: 'False positive' };
 const THREAT_STATUS_TONE = { active: 'critical', neutralised: 'ok', acknowledged: 'unknown', false_positive: 'unknown' };
 const THREAT_ACTION_TEXT = {
@@ -2950,6 +2985,13 @@ function threatPath(suffix = '') {
 async function loadThreats() {
   threatDeviceId = await fillDeviceSelect($('threat-device'), () => {
     threatDeviceId = $('threat-device').value;
+    threatData = null;
+    threatPendingCard = null;
+    $('threat-dialog').close();
+    $('threat-findings').replaceChildren();
+    $('threat-sources').replaceChildren();
+    $('threat-categories').replaceChildren();
+    setText('threat-status', 'Loading the selected device...');
     threatFilter = null;
     threatProposals.length = 0;
     $('threat-chat-messages').innerHTML = '';
@@ -2972,6 +3014,7 @@ async function refreshThreats() {
     renderThreats();
     if (data.jobs.some((job) => job.action === 'threat-scan') && $('threats').classList.contains('active-tab')) threatPollTimer = setTimeout(refreshThreats, 3000);
   } catch (error) {
+    if (deviceId !== threatDeviceId) return;
     $('threat-status').textContent = friendlyError(error);
     $('threat-findings').innerHTML = '';
   }
@@ -2992,6 +3035,7 @@ async function refreshThreatBadge() {
 
 function renderThreats() {
   const data = threatData;
+  if (!data) return;
   const scan = data.scan;
   const scanning = data.jobs.find((job) => job.action === 'threat-scan');
   $('threat-scan').disabled = Boolean(scanning);
@@ -3014,14 +3058,22 @@ function renderThreats() {
   $('threat-categories').innerHTML = scan ? [`<button type="button" class="threat-category${threatFilter ? '' : ' active'}" data-threat-filter=""><strong>${total}</strong><span>All open</span></button>`]
     .concat(categories.map((item) => `<button type="button" class="threat-category${threatFilter === item.id ? ' active' : ''}${item.open ? ` sev-${escapeHtml(item.severity)}` : ''}" data-threat-filter="${escapeHtml(item.id)}" title="${escapeHtml(item.description)}">
       <strong>${item.open}</strong><span>${escapeHtml(item.title)}</span>${item.count > item.open ? `<small>${item.count - item.open} closed</small>` : ''}</button>`)).join('') : '';
-  const findings = (scan?.findings || []).filter((finding) => !threatFilter || finding.category === threatFilter);
+  const terms = ($('threat-search').value || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const severity = $('threat-severity').value;
+  const status = $('threat-state').value;
+  const findings = (scan?.findings || []).filter((finding) => {
+    const text = JSON.stringify([finding.id, finding.title, finding.summary, finding.path, finding.source, finding.event_ids, finding.proof, finding.objects, finding.threats]).toLowerCase();
+    return (!threatFilter || finding.category === threatFilter) && (!severity || finding.severity === severity)
+      && (!status || finding.status === status) && terms.every((term) => text.includes(term));
+  });
+  setText('threat-search-count', `${findings.length} of ${scan?.findings?.length || 0} findings shown`);
   setText('threat-filter-title', threatFilter ? (categories.find((item) => item.id === threatFilter)?.title || 'Findings') : 'All categories');
   if (!scan) {
     $('threat-findings').innerHTML = '<p class="soft-label">No scan yet.</p>';
     return;
   }
   if (!findings.length) {
-    $('threat-findings').innerHTML = `<p class="soft-label">${threatFilter ? 'Nothing in this category.' : 'Nothing suspicious found in this scan.'}${scan.unreadable.length ? ` Some logs could not be read: ${escapeHtml(scan.unreadable.map((source) => source.name).join(', '))}.` : ''}</p>`;
+    $('threat-findings').innerHTML = `<p class="soft-label">${threatFilter || terms.length || severity || status ? 'No findings match these filters. Clear the filters to see the other findings.' : 'No findings were returned by the available sources; this does not establish that the device is clean.'}${scan.unreadable.length ? ` Some logs could not be read: ${escapeHtml(scan.unreadable.map((source) => source.name).join(', '))}.` : ''}</p>`;
     return;
   }
   let category = null;
@@ -3051,6 +3103,7 @@ function renderThreatFinding(finding) {
     return `<li><span>${escapeHtml(step.text)}</span>${action ? threatActionButton(finding, action) : ''}</li>`;
   }).join('');
   const links = finding.lookups.length ? `<p class="threat-links">Look up the hash: ${finding.lookups.map((link) => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join(' · ')}</p>` : '';
+  const reputationHash = finding.lookups.find((link) => link.label === 'VirusTotal')?.url.match(/\/file\/([a-fA-F0-9]{64})(?:\/|$)/)?.[1];
   const marked = finding.status === 'acknowledged' || finding.status === 'false_positive';
   const marks = marked
     ? `<button type="button" class="ghost-button" data-threat-mark="" data-finding="${escapeHtml(finding.id)}">Reopen</button>${finding.mark_note ? `<span class="soft-label">Note: ${escapeHtml(finding.mark_note)}</span>` : ''}`
@@ -3072,6 +3125,7 @@ function renderThreatFinding(finding) {
       <h4>Suggested action path</h4>
       <ol class="threat-steps">${steps}</ol>
       ${links}
+      ${reputationHash ? `<button type="button" class="ghost-button" data-vt-hash="${reputationHash}">Check hash with VirusTotal</button>` : ''}
       <p class="threat-result hidden" id="threat-result-${escapeHtml(finding.id)}"></p>
       <footer class="button-row">${marks}</footer>
     </article>`;
@@ -3242,6 +3296,7 @@ async function restoreThreat(batchId, name) {
 }
 
 function wireThreats() {
+  ['threat-search', 'threat-severity', 'threat-state'].forEach((id) => $(id).addEventListener('input', renderThreats));
   $('threat-scan').addEventListener('click', startThreatScan);
   $('threat-explain').addEventListener('click', explainThreats);
   $('threat-chat-form').addEventListener('submit', sendThreatChat);
@@ -3376,7 +3431,7 @@ function wireEvents() {
     if (event.target.dataset.diagnose) diagnoseAlert(event.target.dataset.diagnose);
   });
 
-  $('refresh-security').addEventListener('click', loadSecurity);
+  $('refresh-security').addEventListener('click', () => wbSecurityScan());
   wireThreats();
   wireMicrosoft();
   $('perf-run').addEventListener('click', runPerformanceTest);

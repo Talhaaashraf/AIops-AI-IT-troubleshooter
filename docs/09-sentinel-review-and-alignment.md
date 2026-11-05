@@ -105,3 +105,13 @@ Still outstanding from the task tracker:
 - The Groq model-switcher choice and cloud-warning flow remain backlog work. The existing environment-configured provider is not a completed UI feature.
 
 This is a source/history alignment review with regression testing, not a claim that every backend path or production deployment has been audited or exercised live.
+
+## Ask Technician follow-up (2026-11-05)
+
+The chat implementation had defects separate from the earlier diagnosis/learning work: its prompt forced general questions into a health diagnosis; the API ignored the browser's history and instead shared a default per-device history; stored assistant turns lost their recommendations; and agent snapshots reached the model without freshness information. The returned API session id also gained another device suffix each time it was reused.
+
+Chat now has a conversational, English-only prompt, a 700-token answer budget, and selective existing domain/error-code guidance. Per the user's preference, shared AI principles and threat chat also require English answers regardless of the input language. It retains up to six normalized history messages within a 6,000-character budget, including recommendation steps, and accepts only user/assistant roles. Browser conversations supply their own history; legacy API callers receive a stable, device-scoped session id. Snapshot source, age, status and availability accompany the model input and the decision record. Missing agent data does not cause a fallback to a container or another device.
+
+The UI clears history and messages when the selected device changes, prevents concurrent sends, displays pending/error states, and shows the snapshot timestamp. Optional technical detail is displayed without forcing a root-cause label onto general answers. The chat still only gives advice: it does not browse, run tools or perform fixes.
+
+Local validation: **292 unit tests passed**, including 16 new regression cases. JavaScript syntax and isolated UI logic checks passed (follow-up history, duplicate sends, error cleanup, device changes and historical labels). Browser rendering was not exercised; Playwright was unavailable in the installed Python environment. Tests use simulated model responses and cannot establish actual language quality or factual accuracy. The running LAN app at `http://10.164.48.204` still needs these source changes deployed and real English/Roman Urdu questions, follow-ups and offline-device scenarios checked against its model. No deployment, model replacement or device remediation was performed in this pass.

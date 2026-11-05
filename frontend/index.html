@@ -267,13 +267,19 @@
               <div><p class="kicker">Findings</p><h2 id="threat-filter-title">All categories</h2></div>
               <button id="threat-explain" class="ghost-button" type="button"><svg><use href="#i-spark"/></svg>Explain with AI</button>
             </div>
+            <div class="sw-toolbar">
+              <label class="sw-field"><span>Search findings</span><input id="threat-search" class="field-input" type="search" maxlength="200" placeholder="File, path, hash, event ID or process"></label>
+              <label class="sw-field"><span>Severity</span><select id="threat-severity" class="field-input"><option value="">All severities</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select></label>
+              <label class="sw-field"><span>Status</span><select id="threat-state" class="field-input"><option value="">All statuses</option><option value="active">Active</option><option value="neutralised">Neutralised</option><option value="acknowledged">Acknowledged</option><option value="false_positive">False positive</option></select></label>
+            </div>
+            <p id="threat-search-count" class="soft-label" role="status"></p>
             <div id="threat-explanation" class="threat-explanation hidden"></div>
             <div id="threat-findings" class="threat-findings"><p class="soft-label">No scan yet.</p></div>
           </section>
           <aside class="panel threat-chat">
             <div class="section-heading"><div><p class="kicker">Action chat</p><h2>Ask or tell AIops</h2></div></div>
             <div id="threat-chat-messages" class="chat-messages">
-              <div class="chat-message assistant">Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "T1 ko rescan karo". I show an approval card: nothing runs until you approve it.</div>
+              <div class="chat-message assistant">Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "rescan T1". I show an approval card: nothing runs until you approve it.</div>
             </div>
             <form id="threat-chat-form" class="chat-form">
               <input id="threat-chat-input" autocomplete="off" maxlength="1000" placeholder="quarantine T1" aria-label="Ask or tell AIops">
@@ -329,8 +335,9 @@
             <h1>Security</h1>
             <p class="subheading">Firewall, antivirus, disk encryption, updates, and exposed ports.</p>
           </div>
-          <button id="refresh-security" class="ghost-button">Re-scan now</button>
+          <div class="button-row"><label class="device-picker"><span>Device</span><select id="security-device" class="field-input"></select></label><button id="refresh-security" class="ghost-button">Run security checks</button></div>
         </header>
+        <p id="security-status" class="soft-label" role="status">Select a device to review its security evidence.</p>
 
         <div class="metric-grid status-grid">
           <article class="metric-card" id="firewall-card"><div class="metric-head"><span>Firewall</span><span id="firewall-state" class="metric-state">--</span></div><p id="firewall-detail">Waiting</p></article>
@@ -343,6 +350,7 @@
         <section class="panel">
           <div class="section-heading">
             <div><p class="kicker">Exposure</p><h2>Listening ports</h2></div>
+            <label class="sw-field"><span>Search ports</span><input id="security-search" class="field-input" type="search" maxlength="200" placeholder="Port, address or process"></label>
             <span id="ports-count" class="soft-label">-- open</span>
           </div>
           <div class="table-wrap flat">
@@ -360,7 +368,7 @@
           <div>
             <p class="kicker">Per device · OS &amp; hardware tests</p>
             <h1>Performance</h1>
-            <p class="subheading">One full test of a device: live load, a speed benchmark, start-up time, hardware, disks, battery, keyboard and mouse, and every OS and app update waiting. The test only reads; nothing is installed or changed until you click a button and confirm.</p>
+            <p class="subheading">Run individual checks or a full test on the selected device. The short benchmark creates and removes a temporary file. Hardware observations, interactive checks and approved load tests are shown separately.</p>
           </div>
           <button id="perf-run" class="primary-button" type="button"><svg><use href="#i-gauge"/></svg>Run full test</button>
         </header>
@@ -372,6 +380,9 @@
         <section id="perf-ai" class="panel perf-ai hidden" aria-live="polite"></section>
         <div id="perf-findings" class="perf-findings hidden"></div>
         <div id="perf-sections" class="perf-grid"></div>
+        <section class="panel"><div class="section-heading"><div><p class="kicker">Selected device</p><h2>Hardware Tests</h2><p class="soft-label">Detection and telemetry do not prove a component works. Unavailable evidence stays unknown.</p></div></div><div id="hardware-tests" class="workbench-rows"></div></section>
+        <section class="panel"><h2>Bounded stress tests</h2><p class="soft-label">Explicit start required. Up to 10 seconds of work: one CPU worker, up to 128 MiB RAM, or up to 64 MiB temporary storage. Thermal monitoring may be unavailable. These are short checks, not exhaustive burn-in tests.</p><div id="stress-tests" class="workbench-rows"></div></section>
+        <section class="panel" id="interactive-hardware"><h2>Interactive hardware checks — this browser's device</h2><p class="soft-label">Open this dashboard on the device you want to test. These results do not describe a different selected agent. Camera and microphone require HTTPS or localhost; recordings stay in this browser.</p><div class="button-row"><button type="button" data-local-test="sound">Test speakers</button><button type="button" data-local-test="microphone">Record microphone</button><button type="button" data-local-test="camera">Preview camera</button><button type="button" data-local-test="display">Test LCD / display</button><button type="button" id="hardware-stop" class="ghost-button">Stop / clear media</button></div><p id="hardware-local-status" class="soft-label" role="status">No interactive test started.</p><video id="hardware-camera" class="hidden" autoplay playsinline muted></video><audio id="hardware-recording" class="hidden" controls></audio><div id="display-test" class="hidden" tabindex="0" role="button" aria-label="Display test: click or press Space for the next colour; Escape to close"></div></section>
         <section id="perf-updates" class="panel hidden"></section>
 
         <section class="panel perf-input-test">
@@ -452,17 +463,18 @@
         <div class="chat-layout">
           <section class="chat-panel">
             <div id="chat-messages" class="chat-messages">
-              <div class="chat-message assistant">I can explain this device's live health signals. What would you like to understand?</div>
+              <div class="chat-message assistant">Ask an IT question or describe a problem with the selected device. All answers are in English.</div>
             </div>
             <form id="chat-form" class="chat-form">
-              <input id="chat-input" autocomplete="off" placeholder="Why is my memory usage high?" aria-label="Ask the technician">
+              <input id="chat-input" maxlength="8000" autocomplete="off" placeholder="Why is my memory usage high?" aria-label="Ask the technician">
               <label class="think-toggle" title="The AI reasons step by step before answering: better answers, but several minutes on a laptop CPU"><input type="checkbox" id="chat-think"> Think deeper</label>
               <button type="submit">Send</button>
             </form>
           </section>
           <aside class="context-panel">
-            <p class="kicker">Live context</p>
+            <p class="kicker">Device snapshot</p>
             <h2>What I can see</h2>
+            <p id="chat-context-status">Snapshot time unavailable.</p>
             <dl>
               <div><dt>HOST</dt><dd id="chat-host">--</dd></div>
               <div><dt>CPU</dt><dd id="chat-cpu">--</dd></div>
@@ -670,6 +682,7 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261030c"></script>
+  <script src="/static/app.js?v=20261105"></script>
+  <script src="/static/workbench.js?v=20261105"></script>
 </body>
 </html>

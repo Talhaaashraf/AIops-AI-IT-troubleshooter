@@ -227,3 +227,11 @@ agent reinstall); I7 adds device tools (reinstall).
 - Verification now leaves missing/failed checks unconfirmed and accepts only actual JSON booleans from AI verification, preventing false successful outcomes from entering learning.
 - Aligned the Learning tab, README, model documentation, concurrency explanation, and historical-plan status with the current implementation.
 - Validation: 276 tests passed (baseline 256); the 10-scenario offline Instant evaluation passed all seven scoring checks. Browser rendering and real-model Fast/Deep evaluation remain outstanding. Full details are in [docs/09-sentinel-review-and-alignment.md](docs/09-sentinel-review-and-alignment.md). No live device actions or server deployment were performed by this review.
+
+## Ask Technician conversation fixes (2026-11-05)
+
+- [~] Separate conversational prompt: answer the actual question in English only, use optional technical detail, ask for missing evidence, and distinguish historical snapshots from current observations. Per the user's language preference, shared AI principles and threat chat also require English answers regardless of the input language. Relevant existing domain/error-code guidance is included as reference knowledge, not device evidence.
+- [~] Use the browser's conversation history; retain previous recommendations for follow-ups. Legacy API session ids remain stable and device-scoped; new sessions no longer share a default history. Bound and normalize history and reject privileged roles.
+- [~] Supply snapshot age, device status and source to the model and decision record. Missing agent telemetry never falls back to another machine's data; general questions still work without a snapshot.
+- [~] Clear the visible conversation when switching devices, prevent overlapping submissions, show a pending answer, and label snapshot timestamps. General answers no longer display an invented "Unknown" root cause.
+- Local validation: 292 unit tests passed (16 added), JavaScript syntax passed, and isolated frontend logic checks passed for history, device switching, pending/error cleanup and historical labels. Browser rendering and real-model answer quality have not been checked. These changes are not yet deployed to the app at `http://10.164.48.204`; live validation remains outstanding.

@@ -6,6 +6,8 @@ Modelfile.
 """
 
 BRAIN_PRINCIPLES = (
+    "Always write user-facing answers, explanations and recommendations in English, regardless of the user's "
+    "language or requests to reply in another language. Preserve exact commands, file paths, names and error codes. "
     "Principles: think it through, using the evidence first and your own IT knowledge of Windows, macOS, Linux and PC "
     "hardware second. You never change the computer yourself: you only suggest actions, and a person decides and approves "
     "every one. Never claim that you ran, fixed or changed anything. When asked for fixes, offer 3-4 genuinely different "

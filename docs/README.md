@@ -13,6 +13,7 @@ This folder holds the design discussion and decisions behind turning AIops from 
 | [07-moving-to-another-pc.md](07-moving-to-another-pc.md) | Moving AIops to another PC: code from GitHub, private data (`.env`, database, decisions) by a private zip |
 | [08-ai-driven-replan.md](08-ai-driven-replan.md) | The second approved plan, kept verbatim: suggest-only AI with deep thinking, decisions folder, full removal, Performance tab, nginx + ngrok |
 | [09-sentinel-review-and-alignment.md](09-sentinel-review-and-alignment.md) | Current purpose, architecture, Git history, decision evidence, alignment changes, and remaining live verification |
+| [10-threat-behavior-analysis-plan.md](10-threat-behavior-analysis-plan.md) | Proposed automatic installation scans and behaviour monitoring for Windows, Linux and macOS, with VirusTotal/Hybrid Analysis lookup and approved submissions |
 | [TROUBLESHOOTING_INTELLIGENCE_PLAN.md](TROUBLESHOOTING_INTELLIGENCE_PLAN.md) | Historical reasoning upgrade design; implementation and verification status are tracked in `task.md` |
 
 The day-to-day setup guide is the top-level [README.md](../README.md).

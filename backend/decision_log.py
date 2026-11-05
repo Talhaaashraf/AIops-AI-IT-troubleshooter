@@ -22,7 +22,7 @@ SAFE_PART = re.compile(r"[^A-Za-z0-9_-]+")
 KINDS = {
     "diagnosis", "fix_approved", "fix_rejected", "fix_done_manually", "fix_result", "health_analysis",
     "log_analysis", "chat_answer", "software_action", "performance_analysis", "model_switch", "leftover_review",
-    "threat_analysis", "threat_chat", "threat_mark",
+    "threat_analysis", "threat_chat", "threat_mark", "file_reputation",
 }
 
 
