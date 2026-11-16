@@ -14,6 +14,8 @@ Historical deployment: phases 0-6 ran in Docker. Later phases below supersede th
 - [x] `task.md` tracker (this file)
 - [x] `aiops-reviewer` subagent (`.claude/agents/aiops-reviewer.md`, read-only)
 - [x] End-to-end checks committed: `tests/e2e/api_check.py`, `tests/e2e/browser_check.py`, `tests/e2e/README.md`
+- [~] QA team (read-only): `qa-functional`, `qa-performance`, `qa-security`, `qa-e2e` in `.claude/agents/`, run together with `/qa` (`.claude/skills/qa/SKILL.md`)
+- [~] Threat-intelligence review fixes (2026-11-16): provider queue starvation, submission state sync, check-file after submit, alerts never blocked by hash recording, stale results after key change, upload lock scope, worker off the event loop, Hybrid Analysis object responses, budget-only settings changes, lock-free bounded agent hashing. Regression tests in `tests/test_intelligence.py`, `tests/test_threats_agent.py`, `tests/test_threat_api.py`
 
 ## Phase 1: Hosting (Docker + nginx + ngrok)
 

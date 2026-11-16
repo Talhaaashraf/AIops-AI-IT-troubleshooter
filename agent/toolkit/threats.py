@@ -678,6 +678,10 @@ def _fit(data):
     while data["items"] and len(json.dumps(data, default=str)) > DATA_LIMIT:
         data["items"].pop()
         data["truncated"] = True
+    hashes = (data.get("intelligence_hashes") or {}).get("files")
+    while hashes and len(json.dumps(data, default=str)) > DATA_LIMIT:
+        hashes.pop()
+        data["truncated"] = True
     return data
 
 
@@ -712,8 +716,11 @@ def threat_scan(hours=168):
     _purge_old_scans()
     leftovers._write_json(_scans_dir() / f"{scan_id}.json", {"created": time.time(), "items": [
         {"id": item["id"], "kind": item["kind"], "path": item["path"], "name": item["fields"].get("Threat") or item["kind"]} for item in items if item.get("path")]})
+    from .security_monitor import scan_hashes
+    # Hashes are part of the result, so they are included before the size bound is applied.
     data = _fit({"scan_id": scan_id, "platform": system, "hours": hours, "scanned_at": datetime.now(timezone.utc).isoformat(), "admin": is_admin(),
-                 "sources": sources, "antivirus": antivirus, "kaspersky_db_date": db_dates[0] if db_dates else None, "items": items, "truncated": False})
+                 "sources": sources, "antivirus": antivirus, "kaspersky_db_date": db_dates[0] if db_dates else None, "items": items, "truncated": False,
+                 "intelligence_hashes": scan_hashes(scan_id, items)})
     return {"ok": True, "summary": _summary(data["items"], sources, hours), "data": data}
 
 

@@ -599,6 +599,14 @@ select.field-input { cursor: pointer; }
 #display-test { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; text-align: center; color: #777; cursor: pointer; padding: 25px; }
 #display-test.hidden { display: none; }
 #vt-result { overflow-wrap: anywhere; white-space: pre-wrap; }
+.ti-provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; margin: 16px 0; }
+.ti-provider-card { padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); min-width: 0; }
+.ti-provider-card label { display: block; margin: 12px 0; }
+.ti-provider-card .field-input { width: 100%; }
+.intelligence-panel p, .ti-history-item { overflow-wrap: anywhere; }
+.intelligence-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow: auto; }
+.intelligence-panel details { margin: 18px 0; }
+.ti-history-item { display: block; text-align: left; max-width: 100%; margin: 8px 0; }
 @media (max-width: 680px) { .workbench-row { grid-template-columns: minmax(0, 1fr) auto; } .workbench-row > div { grid-column: 1 / -1; } }
 .perf-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .perf-card.ok { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }

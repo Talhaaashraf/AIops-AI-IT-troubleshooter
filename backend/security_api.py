@@ -77,7 +77,11 @@ async def prepare_sample(device: str, payload: dict, request: Request):
         raise HTTPException(403, "Provider must be configured and authorized for business use")
     if payload.get("scan_id") != analysis["scan_id"]:
         raise HTTPException(409, "The scan changed; review the file again")
-    body = {"device": selected.device_id, "provider": provider, "sha256": sha, "scan_id": analysis["scan_id"], "item_id": finding["item_id"]}
+    size = payload.get("size")
+    if type(size) is not int or not 0 < size <= security_samples.MAX_BYTES:
+        raise HTTPException(400, "Confirm the file size in bytes (maximum 32 MiB)")
+    body = {"device": selected.device_id, "provider": provider, "sha256": sha, "size": size,
+            "path": finding["path"], "scan_id": analysis["scan_id"], "item_id": finding["item_id"]}
     transfer = store.approval_issue(selected.device_id, body)
     store.state_set("transfer:" + transfer, body)
     result = await execute(selected, "security_sample_transfer", {"scan_id": analysis["scan_id"], "item_id": finding["item_id"], "sha256": sha, "transfer_id": transfer}, "medium")
@@ -98,7 +102,7 @@ def accept_sample(request: Request, file: UploadFile = File(...)):
     finally:
         file.file.close()
     import hashlib
-    if len(content) > security_samples.MAX_BYTES or hashlib.sha256(content).hexdigest() != body["sha256"]:
+    if len(content) != body["size"] or len(content) > security_samples.MAX_BYTES or hashlib.sha256(content).hexdigest() != body["sha256"]:
         raise HTTPException(409, "File content does not match approval")
     if not store.approval_consume(token, device["device_id"], body):
         raise HTTPException(409, "Transfer approval expired or was already used")

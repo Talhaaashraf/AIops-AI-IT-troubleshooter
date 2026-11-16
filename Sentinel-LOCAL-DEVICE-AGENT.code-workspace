@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"powershell.cwd": "Project-tool1",
+		"liveServer.settings.multiRootWorkspaceName": "garak_runs"
+	}
+}

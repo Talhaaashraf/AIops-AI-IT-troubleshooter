@@ -184,3 +184,14 @@ def test_an_old_agent_is_not_asked_again_for_a_while(server, monkeypatch):
     job = scanned()
     assert job["summary"] == main.NEW_AGENT_MESSAGE and main.threat_unsupported["dev1"] > 0
     main.threat_unsupported.clear()
+
+
+def test_a_failing_intelligence_hook_never_suppresses_threat_alerts(server, monkeypatch):
+    from backend import intelligence_jobs
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(intelligence_jobs, "observe", broken)
+    data = scan_data(); data["intelligence_hashes"] = {"files": [{"sha256": "bad"}]}
+    main._after_threat_scan(Target("dev1", "Windows", "laptop"), True, "", data)
+    alerts = alert_store.get_alerts(device_id="dev1")
+    assert len(alerts) == 1 and alerts[0]["severity"] == "critical"

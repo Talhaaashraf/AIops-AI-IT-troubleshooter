@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 
 from . import security_store as store, task_queue, task_signals
@@ -139,10 +140,11 @@ async def run(identity):
                 from .main import _after_threat_scan
                 _after_threat_scan(target, True, step["result"].get("summary", ""), data)
             if step["tool"] == "security_hashes":
-                from .intelligence import enqueue_hash
-                for row in data.get("files", []):
-                    for provider in ("virustotal", "hybrid_analysis"):
-                        enqueue_hash(provider, row["sha256"])
+                try:
+                    from .intelligence_jobs import observe
+                    observe(target.device_id, data.get("files", []), job["id"])
+                except Exception:
+                    logging.getLogger(__name__).exception("Recording investigation hashes for intelligence lookups failed")
         job["evidence"] = [{"id": str(index + 1), "tool": row["tool"], "summary": row.get("result", {}).get("summary"), "ok": row.get("result", {}).get("ok", False)} for index, row in enumerate(job["steps"])]
         job["summary"] = "Security evidence collected. Review findings and unavailable sources; this is not a clean-device certification."
         job["explanation_status"] = "unavailable"

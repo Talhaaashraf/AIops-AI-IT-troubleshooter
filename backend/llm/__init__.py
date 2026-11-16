@@ -15,7 +15,8 @@ from dotenv import load_dotenv
 
 from .base import LLMDisconnectedError, LLMModelError, LLMTimeoutError, LLMUnavailableError
 
-load_dotenv()
+if os.getenv("PYTHON_DOTENV_DISABLED") != "1":
+    load_dotenv()
 
 _provider = None
 

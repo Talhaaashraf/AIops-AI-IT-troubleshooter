@@ -14,9 +14,14 @@ def _report(raw, sha):
     results = attrs.get("last_analysis_results", attrs.get("results", {}))
     if not isinstance(stats, dict) or not isinstance(results, dict):
         raise HTTPException(502, "VirusTotal returned invalid analysis results")
+    counts = {name: value for name, value in stats.items() if type(value) is int and value >= 0}
+    classification = "unknown" if not raw or not counts else "malicious" if counts.get("malicious", 0) else "suspicious" if counts.get("suspicious", 0) else "no_detections_reported"
     return {"sha256": sha, "found": raw is not None,
+            "classification": classification,
             "status": attrs.get("status", "known" if raw else "unknown"),
-            "stats": {name: value for name, value in stats.items() if isinstance(value, int) and not isinstance(value, bool) and value >= 0},
+            "stats": counts,
+            "reputation": attrs.get("reputation"), "threat_classification": attrs.get("popular_threat_classification"),
+            "file_type": attrs.get("type_description"), "size": attrs.get("size"),
             "analysed_at": attrs.get("last_analysis_date"),
             "detections": [{"engine": str(name)[:120], "category": row.get("category"), "result": str(row.get("result") or "")[:240]}
                            for name, row in list(results.items())[:100] if isinstance(row, dict) and row.get("category") in ("malicious", "suspicious")],

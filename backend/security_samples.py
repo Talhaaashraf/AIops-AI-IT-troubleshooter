@@ -1,5 +1,9 @@
-"""Provider-bound, single-use submission approvals. Bytes are never executed or persisted."""
+"""Provider-bound, single-use approvals. Samples are never executed.
+
+Staged bytes live in memory; the framework may temporarily spool multipart input.
+"""
 import hashlib
+import json
 import re
 import secrets
 import threading
@@ -16,25 +20,33 @@ _lock = threading.RLock()
 router = APIRouter(prefix="/api/threat-intelligence", dependencies=[Depends(intel.operator)])
 
 
-def discard(token):
+def discard(token, state="expired"):
     with _lock:
         _stages.pop(token, None)
+    item = store.state_get("submission:" + token)
+    if item and item.get("state") == "pending_approval":
+        store.state_set("submission:" + token, {**item, "state": state})
 
 
 def clear(provider):
     with _lock:
         for token in list(_stages):
             if _stages[token]["provider"] == provider:
-                _stages.pop(token)
+                discard(token, "cancelled")
 
 
 def stage(provider, content, source="browser"):
     if not content or len(content) > MAX_BYTES:
         raise HTTPException(413, "Select a non-empty file no larger than 32 MiB")
     sha = hashlib.sha256(content).hexdigest()
+    # Hash lookup first: a previously submitted file must still return its known report.
     report = intel.lookup(provider, sha)
     if report["found"]:
         return report
+    with store.connect() as db:
+        prior = db.execute("SELECT token,state FROM intelligence_submissions WHERE provider=? AND hash=?", (provider, sha)).fetchone()
+    if prior and prior["state"] not in ("failed", "cancelled"):
+        raise HTTPException(409, "This file was already submitted or its outcome is unknown; check its existing analysis instead of uploading again")
     body = {"provider": provider, "sha256": sha, "size": len(content), "source": source, "configuration": intel.policy(provider).get("generation")}
     with _lock:
         for token in list(_stages):
@@ -48,7 +60,8 @@ def stage(provider, content, source="browser"):
         timer.daemon = True
         timer.start()
     store.state_set("submission:" + token, {**body, "state": "pending_approval", "expires": time.time() + TTL})
-    return {**report, "upload_token": token, "source": source, "expires_in_seconds": TTL}
+    store.audit("sample_staged", provider=provider, sha256=sha, token=token, state="pending_approval")
+    return {**report, "upload_token": token, "source": source, "size": len(content), "expires_in_seconds": TTL}
 
 
 @router.post("/{provider}/check-file")
@@ -66,17 +79,30 @@ def cancel(provider: str, token: str):
     item = store.state_get("submission:" + token)
     if not item or item["provider"] != provider:
         raise HTTPException(404, "Sample not found")
-    discard(token)
-    store.state_set("submission:" + token, {**item, "state": "expired"})
+    if item["state"] != "pending_approval":
+        raise HTTPException(409, "An in-flight or completed submission cannot be cancelled")
+    discard(token, "cancelled")
     return {"discarded": True}
 
 
 @router.post("/{provider}/uploads/{token}")
 def upload(provider: str, token: str, payload: dict, request: Request):
     intel.secure_transport(request)
+    # The configuration lock covers validation and the single-use claim only, never network I/O.
+    with intel._lock:
+        item, record = _claim(provider, token, payload)
+    return _submit(provider, token, item, record)
+
+
+def _claim(provider, token, payload):
+    if not intel.allowed(provider) or not intel.policy(provider)["upload_authorized"]:
+        raise HTTPException(403, "External submission is disabled; record provider-specific upload permission first")
     if payload.get("approved") is not True:
         raise HTTPException(400, "Explicit provider-specific approval is required")
     environment = payload.get("environment_id")
+    capabilities = store.state_get("capabilities:" + provider, {})
+    if not capabilities.get("verified"):
+        raise HTTPException(409, "Test this provider connection before approving an upload")
     if provider == "hybrid_analysis":
         capabilities = store.state_get("capabilities:" + provider, {})
         if type(environment) is not int or environment not in capabilities.get("environments", []):
@@ -90,10 +116,22 @@ def upload(provider: str, token: str, payload: dict, request: Request):
             raise HTTPException(409, "Sample or provider configuration changed; approval must be renewed")
         if not store.approval_consume(token, item["source"], item["binding"]):
             raise HTTPException(409, "Approval expired or already used")
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute("SELECT state FROM intelligence_submissions WHERE provider=? AND hash=?", (provider, item["sha256"])).fetchone()
+            if prior and prior["state"] not in ("failed", "cancelled"):
+                raise HTTPException(409, "Duplicate submission refused; inspect the existing analysis")
+            db.execute("INSERT OR REPLACE INTO intelligence_submissions VALUES (?,?,?,?)", (provider, item["sha256"], token, "submitting"))
         item = _stages.pop(token)
-    record = {**item["binding"], "state": "submitting", "approved_at": time.time()}
+    record = {**item["binding"], "state": "submitting", "approved_at": time.time(), "environment_id": environment}
     # Durable state before network I/O: ambiguous uploads can never be retried automatically.
     store.state_set("submission:" + token, record)
+    return item, record
+
+
+def _submit(provider, token, item, record):
+    environment = record["environment_id"]
+    store.audit("sample_upload_approved", provider=provider, sha256=item["sha256"], token=token, state="submitting")
     try:
         kwargs = {"files": {"file": (item["sha256"] + ".bin", item["bytes"], "application/octet-stream")}}
         if provider == "hybrid_analysis":
@@ -108,8 +146,15 @@ def upload(provider: str, token: str, payload: dict, request: Request):
         record["detail"] = error.detail
         store.state_set("submission:" + token, record)
         raise
+    except Exception:
+        record.update(state="outcome_unknown", detail="Submission outcome is unknown; no automatic retry")
+        store.state_set("submission:" + token, record)
+        raise HTTPException(502, record["detail"]) from None
     finally:
         item.pop("bytes", None)
+        with store.connect() as db:
+            db.execute("UPDATE intelligence_submissions SET state=? WHERE token=?", (record["state"], token))
+        store.audit("sample_upload_result", provider=provider, sha256=record["sha256"], token=token, state=record["state"])
     store.state_set("submission:" + token, record)
     return {"analysis_token": token, "sha256": record["sha256"], "status": "queued", "provider": provider}
 
@@ -119,19 +164,51 @@ def analysis(provider: str, token: str):
     item = store.state_get("submission:" + token)
     if not item or item["provider"] != provider:
         raise HTTPException(404, "Analysis not found")
-    return {"provider": provider, "sha256": item["sha256"], "status": item["state"], **item.get("report", {}), "detail": item.get("detail")}
+    if item["state"] == "pending_approval" and item.get("expires", 0) <= time.time():
+        discard(token)
+        item = store.state_get("submission:" + token)
+    return {**item.get("report", {}), "provider": provider, "sha256": item["sha256"], "status": item["state"], "analysis_token": token, "detail": item.get("detail"), "source": item.get("source"), "provenance": "external-sandbox-or-reputation"}
 
 
-def poll_due():
+ACTIVE = ("pending_approval", "submitting", "submitted", "analysing")
+
+
+def _active_rows():
+    # Only unfinished submissions; finished records are kept for history but never rescanned.
+    marks = ",".join("?" * len(ACTIVE))
     with store.connect() as db:
-        rows = db.execute("SELECT name,body FROM security_state WHERE name LIKE 'submission:%'").fetchall()
-    import json
-    for row in rows:
+        return db.execute(f"SELECT name,body FROM security_state WHERE name LIKE 'submission:%' AND json_extract(body,'$.state') IN ({marks})", ACTIVE).fetchall()
+
+
+def _save(token, item):
+    """Persist a submission record and keep the duplicate-guard table in the same state."""
+    store.state_set("submission:" + token, item)
+    with store.connect() as db:
+        db.execute("UPDATE intelligence_submissions SET state=? WHERE token=?", (item["state"], token))
+
+
+def reconcile(restarting=False, rows=None):
+    for row in _active_rows() if rows is None else rows:
         item = json.loads(row["body"])
+        token = row["name"].split(":", 1)[1]
+        if item["state"] == "pending_approval" and (restarting or item.get("expires", 0) <= time.time()):
+            discard(token)
+        elif restarting and item["state"] == "submitting":
+            item.update(state="outcome_unknown", detail="Server restarted during submission; do not resubmit automatically")
+            _save(token, item)
+    if restarting:
+        with store.connect() as db:
+            db.execute("UPDATE intelligence_submissions SET state='outcome_unknown' WHERE state='submitting'")
+
+
+def poll_due(rows=None):
+    for row in _active_rows() if rows is None else rows:
+        item = json.loads(row["body"])
+        token = row["name"].split(":", 1)[1]
         if item["state"] not in ("submitted", "analysing") or item.get("next_poll", 0) > time.time() or not intel.allowed(item["provider"]):
             continue
         if time.time() - item.get("approved_at", 0) > 3600:
-            store.state_set(row["name"], {**item, "state": "outcome_unknown", "detail": "Polling deadline reached; look up the hash later"})
+            _save(token, {**item, "state": "outcome_unknown", "detail": "Polling deadline reached; look up the hash later"})
             continue
         provider = item["provider"]
         try:
@@ -141,9 +218,17 @@ def poll_due():
                 report = _report(raw, item["sha256"])
                 complete = report.get("status") == "completed"
             else:
-                report = intel.normalize(provider, [raw] if raw else [], item["sha256"])
+                from .intelligence_jobs import summary
+                report = summary(raw, item["sha256"])
                 complete = bool(raw and raw.get("state") in ("SUCCESS", "ERROR"))
-            item.update(state="completed" if complete else "analysing", report=report, next_poll=time.time() + 60)
+            item.update(state="failed" if provider == "hybrid_analysis" and raw.get("state") == "ERROR" else "completed" if complete else "analysing", report=report, next_poll=time.time() + 60)
         except HTTPException as error:
             item.update(detail=error.detail, next_poll=time.time() + 120)
-        store.state_set(row["name"], item)
+        _save(token, item)
+
+
+def maintain():
+    """One worker pass: a single read of unfinished submissions serves both expiry and polling."""
+    rows = _active_rows()
+    reconcile(rows=rows)
+    poll_due(rows=rows)

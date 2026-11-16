@@ -912,6 +912,12 @@ def _after_threat_scan(target, ok, summary, data):
     for finding in analysis["findings"]:
         if finding["status"] == "active" and finding["severity"] in ("critical", "high"):
             add_alert({"severity": finding["severity"], "category": "Threat", "description": f"{finding['title']} ({finding['source']}): open Threat Detection"}, target.device_id)
+    # External reputation is optional enrichment: it runs after alerting and can never suppress it.
+    try:
+        from .intelligence_jobs import observe
+        observe(target.device_id, (data.get("intelligence_hashes") or {}).get("files", []))
+    except Exception:
+        logging.getLogger(__name__).exception("Recording threat-scan hashes for intelligence lookups failed")
 
 
 def _start_threat_scan(target):

@@ -5,7 +5,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.getenv("PYTHON_DOTENV_DISABLED") != "1":
+    load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # SQLite file for alerts, devices, sessions, tasks and learned cases (a volume path in Docker).

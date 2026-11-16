@@ -10,8 +10,16 @@ from .config import DB_PATH
 POLICY_VERSION = "security-1"
 
 
+class Connection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 def connect():
-    db = sqlite3.connect(DB_PATH, timeout=10)
+    db = sqlite3.connect(DB_PATH, timeout=10, factory=Connection)
     db.row_factory = sqlite3.Row
     db.executescript("""
     CREATE TABLE IF NOT EXISTS security_jobs (
@@ -29,8 +37,22 @@ def connect():
       state TEXT, due REAL, created REAL, body TEXT, UNIQUE(provider,hash,operation));
     CREATE TABLE IF NOT EXISTS intelligence_usage (provider TEXT, stamp REAL);
     CREATE INDEX IF NOT EXISTS intelligence_usage_provider ON intelligence_usage(provider,stamp);
+    CREATE TABLE IF NOT EXISTS intelligence_credentials (provider TEXT PRIMARY KEY, ciphertext TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS intelligence_observations (id TEXT PRIMARY KEY, device TEXT, hash TEXT, observed REAL, body TEXT);
+    CREATE INDEX IF NOT EXISTS intelligence_observations_device ON intelligence_observations(device,observed);
+    CREATE TABLE IF NOT EXISTS intelligence_audit (id TEXT PRIMARY KEY, stamp REAL, operation TEXT, body TEXT);
+    CREATE TABLE IF NOT EXISTS intelligence_submissions (provider TEXT, hash TEXT, token TEXT, state TEXT,
+      PRIMARY KEY(provider,hash));
     """)
     return db
+
+
+def audit(operation, **metadata):
+    # Callers pass identities/status only, never arbitrary request bodies or credentials.
+    allowed = {key: value for key, value in metadata.items() if key in
+               ("provider", "sha256", "device", "token", "state", "enabled", "business_authorized", "upload_authorized")}
+    with connect() as db:
+        db.execute("INSERT INTO intelligence_audit VALUES (?,?,?,?)", (secrets.token_hex(16), time.time(), operation, json.dumps(allowed)))
 
 
 def unpack(row):
@@ -144,3 +166,6 @@ def cleanup():
             db.execute(f"DELETE FROM {table} WHERE {column}<?", (now - days * 86400,))
         db.execute("DELETE FROM security_jobs WHERE kind!='baseline' AND state NOT IN ('queued','running') AND updated<?", (now - 90 * 86400,))
         db.execute("DELETE FROM security_state WHERE updated<? AND (name LIKE 'report:%' OR name LIKE 'submission:%' OR name LIKE 'transfer:%')", (now - 90 * 86400,))
+        db.execute("DELETE FROM intelligence_observations WHERE observed<?", (now - 90 * 86400,))
+        db.execute("DELETE FROM intelligence_audit WHERE stamp<?", (now - 90 * 86400,))
+        db.execute("DELETE FROM intelligence_jobs WHERE created<? AND state NOT IN ('queued','running','retry')", (now - 90 * 86400,))

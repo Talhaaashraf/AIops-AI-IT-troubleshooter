@@ -20,9 +20,25 @@ from .leftovers import agent_dir
 from .registry import tool
 
 _lock = threading.RLock()
+HASH_LIMIT = 25
 _candidates = {}
 _transport = None
 CHANNELS = ("Security", "System", "Microsoft-Windows-PowerShell/Operational", "Microsoft-Windows-Sysmon/Operational", "Microsoft-Windows-Windows Defender/Operational")
+
+
+def scan_hashes(scan_id, items):
+    """Hash only executable scan findings, with the same bounded path checks as process hashes.
+
+    Works on its own candidate list, so it never holds or swaps the shared process-candidate state."""
+    permitted = []
+    for item in items[:100]:
+        path = item.get("path") or ""
+        if item.get("kind") == "malware" and item.get("on_disk") and Path(path).suffix.lower() in (".exe", ".dll", ".sys", ".com", ".scr", ".msi", ".bin", ".dylib", ".so") and _safe_path(path):
+            permitted.append((f"scan:{scan_id}:{item['id']}", path))
+    result = _hash_paths(permitted)
+    for row in result["files"]:
+        _, row["scan_id"], row["item_id"] = row.pop("process_id").split(":")
+    return result
 
 
 def _run(args, timeout=20):
@@ -96,9 +112,17 @@ def process_snapshot():
 
 @tool("security_hashes", "Hash only executable paths discovered by this agent's process snapshot. Never accepts a caller-supplied path.", timeout=30, ai_visible=False)
 def executable_hashes():
-    started, total, rows = time.monotonic(), 0, []
     with _lock:
-        candidates = list(_candidates.items())[:25]
+        candidates = list(_candidates.items())
+    result = _hash_paths(candidates)
+    return {"ok": True, "summary": f"Hashed {len(result['files'])} observed executables within a 10-second/256-MiB budget", "data": result}
+
+
+def _hash_paths(candidates, limit=HASH_LIMIT):
+    """Hash up to `limit` (identity, path) pairs within a 10-second/256-MiB budget. Holds no lock."""
+    started, total, rows = time.monotonic(), 0, []
+    eligible = len(candidates)
+    candidates = candidates[:limit]
     for identity, path in candidates:
         if time.monotonic() - started > 10 or total >= 256 * 1024 ** 2:
             break
@@ -137,7 +161,10 @@ def executable_hashes():
                         rows.append({"process_id": identity, "path": path, "sha256": digest.hexdigest(), "size": after.st_size, "signature": signature})
         except OSError:
             continue
-    return {"ok": True, "summary": f"Hashed {len(rows)} observed executables within a 10-second/256-MiB budget", "data": {"files": rows, "candidates": len(candidates), "deferred": len(candidates) - len(rows), "gaps": ["Signatures are budgeted and platform-dependent; a valid signature is not a safety verdict"]}}
+    gaps = ["Signatures are budgeted and platform-dependent; a valid signature is not a safety verdict"]
+    if eligible > limit:
+        gaps.append(f"{eligible - limit} further executables were not hashed (limit {limit} per run)")
+    return {"files": rows, "candidates": eligible, "deferred": eligible - len(rows), "gaps": gaps}
 
 
 @tool("security_persistence", "Observe supported persistence metadata without reading environment files or executing entries.", timeout=30, ai_visible=False)

@@ -193,3 +193,33 @@ def test_linux_auth_lines_become_sign_in_findings(monkeypatch):
     assert items["failed_logon"]["count"] == 6 and items["failed_logon"]["fields"]["Source address"] == "198.51.100.7"
     assert items["group_member_added"]["fields"] == {"Member": "mallory", "Group": "sudo"}
     assert items["user_created"]["fields"]["New account"] == "mallory"
+
+
+def test_scan_hashing_is_lock_free_and_bounded(tmp_path, monkeypatch):
+    from agent.toolkit import security_monitor
+    monkeypatch.setattr(security_monitor, "os_name", lambda: "Linux")
+    files = []
+    for index in range(security_monitor.HASH_LIMIT + 5):
+        path = tmp_path / f"sample{index}.exe"
+        path.write_bytes(b"inert %d" % index)
+        files.append({"id": f"d{index}", "kind": "malware", "on_disk": True, "path": str(path)})
+    process_candidates = {"proc": "/kept"}
+    monkeypatch.setattr(security_monitor, "_candidates", process_candidates)
+    held = security_monitor._lock.acquire()  # a concurrent process snapshot holding the lock must not block hashing
+    try:
+        import threading
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(security_monitor.scan_hashes("scan1", files)))
+        worker.start(); worker.join(5)
+        assert not worker.is_alive()
+    finally:
+        security_monitor._lock.release()
+    assert held and len(result["files"]) == security_monitor.HASH_LIMIT and result["files"][0]["item_id"] == "d0"
+    assert any("5 further" in gap for gap in result["gaps"])
+    assert security_monitor._candidates is process_candidates and process_candidates == {"proc": "/kept"}
+
+
+def test_fit_includes_intelligence_hashes():
+    data = {"items": [], "intelligence_hashes": {"files": [{"sha256": "a" * 64, "path": "x" * 1000} for _ in range(400)]}}
+    fitted = threats._fit(data)
+    assert len(json.dumps(fitted)) <= threats.DATA_LIMIT and fitted["truncated"] and fitted["intelligence_hashes"]["files"]
