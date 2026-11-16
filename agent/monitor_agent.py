@@ -312,10 +312,45 @@ def task_worker(config, device_id):
             delay = min(delay * 2, 60)
 
 
+def security_worker(config):
+    """Collect while disconnected; remove a spool batch only after a matching server ACK."""
+    try:
+        from toolkit import security_monitor
+    except ImportError:
+        from .toolkit import security_monitor
+    security_monitor._transport = (config["server_url"], config["AGENT_TOKEN"])
+    due = {"events": 0, "processes": 0, "persistence": 0}
+    intervals = {"events": 30, "processes": 60, "persistence": 300}
+    delay = 5
+    while True:
+        try:
+            for kind in due:
+                if time.monotonic() >= due[kind]:
+                    with security_monitor._lock:
+                        security_monitor.enqueue_observations(kind)
+                    due[kind] = time.monotonic() + intervals[kind]
+            with security_monitor.state_db() as db:
+                batches = db.execute("SELECT id,body FROM batches ORDER BY created LIMIT 5").fetchall()
+            for identity, body in batches:
+                response = requests.post(config["server_url"].rstrip("/") + "/api/agents/security/events",
+                                         headers=_headers({"Authorization": "Bearer " + config["AGENT_TOKEN"]}), json=json.loads(body), timeout=15)
+                response.raise_for_status()
+                if response.json().get("batch_id") != identity:
+                    break
+                with security_monitor.state_db() as db:
+                    db.execute("DELETE FROM batches WHERE id=?", (identity,))
+            delay = 5
+        except Exception:
+            logging.warning("Security collection or delivery unavailable; retaining queued evidence")
+            delay = min(delay * 2, 30)
+        time.sleep(delay)
+
+
 def run():
     config = load_config()
     device_id = register_until_accepted(config)
     threading.Thread(target=task_worker, args=(config, device_id), name="sentinel-tasks", daemon=True).start()
+    threading.Thread(target=security_worker, args=(config,), name="sentinel-security", daemon=True).start()
     previous = None
     interval = max(2, int(config.get("interval_seconds", DEFAULT_INTERVAL)))
     logging.info("Agent %s started for device %s", config.get("nickname", socket.gethostname()), device_id)

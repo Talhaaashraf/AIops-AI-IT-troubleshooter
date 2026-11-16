@@ -87,6 +87,12 @@ def test_actions_are_checked_again_on_the_server(server, monkeypatch):
 
     def action(payload):
         async def run():
+            if payload.get("action") in ("quarantine", "delete", "kill", "rescan") and payload.get("finding_id") == "T1":
+                try:
+                    card = main.threat_proposal("dev1", {**payload, "scan_id": main.device_threats("dev1")["scan"]["scan_id"]})
+                    payload["approval_id"] = card["approval_id"]
+                except HTTPException:
+                    pass  # Invalid actions must still be rejected by the execution endpoint.
             return await finished(await main.threat_action("dev1", payload))
         return asyncio.run(run())
 
@@ -154,9 +160,8 @@ def test_no_scan_yet_and_unknown_devices(server):
     with pytest.raises(HTTPException) as unknown:
         main.device_threats("nope")
     assert unknown.value.status_code == 404
-    with pytest.raises(HTTPException) as first:
-        main.threat_chat_endpoint("dev1", {"message": "hi"})
-    assert first.value.status_code == 404
+    first = main.threat_chat_endpoint("dev1", {"message": "hi"})
+    assert first["intent"] == "greeting" and first["proposal"] is None
 
 
 def test_a_cloud_ai_never_sees_names_or_addresses(monkeypatch, server):

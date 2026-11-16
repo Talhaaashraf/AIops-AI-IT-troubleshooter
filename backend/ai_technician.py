@@ -317,8 +317,9 @@ def normalize_chat_history(history):
 
 def chat(message, report, conversation_history, think=False, context=None):
     from .agent_brain.knowledge import retrieve, retrieve_codes
+    from .security_chat import INSTRUCTIONS
 
-    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT + " " + INSTRUCTIONS}]
     messages.extend(normalize_chat_history(conversation_history))
     guidance = "\n".join(filter(None, [retrieve(message, mode="fast"), retrieve_codes(message)]))
     messages.append({"role": "user", "content": json.dumps({
@@ -415,7 +416,7 @@ def _threat_context(analysis):
     cloud = _cloud_ai()
     lines = [finding_text(_for_ai(finding, cloud)) for finding in analysis["findings"][:MAX_THREAT_FINDINGS]]
     unreadable = "; ".join(f"{source['name']}: {source['detail']}" for source in analysis.get("unreadable") or [])
-    return ("\n".join(lines) or "No findings: the scan found nothing suspicious.") + (f"\nNot readable on this device: {unreadable}" if unreadable else "")
+    return ("\n".join(lines) or "No findings supplied. A scan may be missing or incomplete; this does not establish safety.") + (f"\nNot readable on this device: {unreadable}" if unreadable else "")
 
 
 def _schema_completion(messages, schema, max_tokens, think=False):
@@ -454,15 +455,18 @@ def threat_chat(message, analysis, history, think=False):
     schema = {"type": "object", "required": ["reply", "finding_id", "action"], "properties": {
         "reply": {"type": "string"}, "finding_id": {"type": "string", "enum": ids},
         "action": {"type": "string", "enum": list(THREAT_ACTIONS)}, "pid": {"type": "integer"}}}
-    messages = [{"role": "system", "content": THREAT_PROMPT + THREAT_CHAT_RULES +
+    from .security_chat import INSTRUCTIONS
+    messages = [{"role": "system", "content": THREAT_PROMPT + THREAT_CHAT_RULES + INSTRUCTIONS +
                  ' Schema: {"reply": "...", "finding_id": "T1 or none", "action": "none|rescan|quarantine|kill|delete", "pid": 0}.'}]
-    messages.extend({"role": item["role"], "content": str(item.get("content", ""))} for item in history[-6:])
+    messages.extend(normalize_chat_history(history))
     messages.append({"role": "user", "content": f"Findings:\n{_threat_context(analysis)}\n\nQuestion: {message}"})
-    raw = _schema_completion(messages, schema, 350, think)
+    raw = _schema_completion(messages, schema, 700, think)
     try:
         result = _loads_lenient(raw)
+        if not isinstance(result, dict):
+            raise ValueError("Expected a chat object")
     except (TypeError, ValueError):
         result = {"reply": raw}
     pid = result.get("pid")
-    return {"reply": " ".join(str(result.get("reply") or "").split())[:1200], "finding_id": str(result.get("finding_id") or "none"),
+    return {"reply": str(result.get("reply") or "").strip()[:6000], "finding_id": str(result.get("finding_id") or "none"),
             "action": str(result.get("action") or "none"), "pid": pid if isinstance(pid, int) and pid > 0 else None}

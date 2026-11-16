@@ -50,11 +50,11 @@ def _task_dict(row):
     return task
 
 
-def enqueue_task(device_id, tool_id, args, max_risk, timeout_seconds, session_id=None):
-    task_id = uuid.uuid4().hex
+def enqueue_task(device_id, tool_id, args, max_risk, timeout_seconds, session_id=None, task_id=None):
+    task_id = task_id or uuid.uuid4().hex
     with _connect() as connection:
         connection.execute(
-            "INSERT INTO agent_tasks (task_id, device_id, tool_id, args_json, max_risk, timeout_seconds, status, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+            "INSERT OR IGNORE INTO agent_tasks (task_id, device_id, tool_id, args_json, max_risk, timeout_seconds, status, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
             (task_id, device_id, tool_id, json.dumps(args or {}), max_risk, int(timeout_seconds), session_id, _now().isoformat()),
         )
         connection.commit()

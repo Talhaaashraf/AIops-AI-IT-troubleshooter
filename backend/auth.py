@@ -48,7 +48,7 @@ def has_valid_session(cookies):
 # dashboard cookie, so the session gate must let them through.
 # Exact paths, plus prefixes that end in "/": a device id such as "report1" must never make
 # /api/agents/report1/... public by sharing a prefix with an agent route.
-PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/agents/register", "/api/agents/report", "/api/agents/bundle"})
+PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/agents/register", "/api/agents/report", "/api/agents/bundle", "/api/agents/security/events", "/api/agents/security/sample-transfer"})
 PUBLIC_PATH_PREFIXES = ("/static/", "/install/", "/api/agents/tasks/", "/api/agents/binary/")
 
 

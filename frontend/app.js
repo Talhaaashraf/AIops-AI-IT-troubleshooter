@@ -2967,6 +2967,8 @@ let threatData = null;
 let threatFilter = null;
 let threatPollTimer = null;
 let threatPendingCard = null;
+let threatConversationId = null;
+let threatChatBusy = false;
 const threatProposals = [];
 const THREAT_CHAT_HELLO = 'Ask about a finding, or say what to do: "is T1 dangerous?", "quarantine T1", "rescan T1". I show an approval card: nothing runs until you approve it.';
 const THREAT_STATUS = { active: 'Open', neutralised: 'Removed', acknowledged: 'Acknowledged', false_positive: 'False positive' };
@@ -2987,6 +2989,7 @@ async function loadThreats() {
     threatDeviceId = $('threat-device').value;
     threatData = null;
     threatPendingCard = null;
+    threatConversationId = null;
     $('threat-dialog').close();
     $('threat-findings').replaceChildren();
     $('threat-sources').replaceChildren();
@@ -3149,7 +3152,12 @@ function threatCard(findingId, actionName, pid) {
   return finding && action ? { finding_id: finding.id, action: action.action, label: action.label, risk: action.risk, pid: action.pid ?? null, confirm: action.confirm ?? null, title: finding.title, path: finding.path } : null;
 }
 
-function openThreatApproval(card, fromChat = false) {
+async function openThreatApproval(card, fromChat = false) {
+  const deviceId = threatDeviceId;
+  try {
+    if (!card.approval_id) card = await readJson(await fetch(threatPath('/proposal'), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...card, scan_id: threatData?.scan?.scan_id})}));
+    if (deviceId !== threatDeviceId || card.device_id !== threatDeviceId) return;
+  } catch (error) { toast(friendlyError(error), 'error'); return; }
   threatPendingCard = { ...card, fromChat };
   setText('threat-dialog-kicker', `Approve on ${threatData.device} · ${card.finding_id} · ${card.risk} risk`);
   setText('threat-dialog-title', `${card.label}: ${card.title}`);
@@ -3173,7 +3181,8 @@ function threatResult(findingId, text, ok) {
 }
 
 async function runThreatAction(card) {
-  const body = { finding_id: card.finding_id, action: card.action, pid: card.pid, confirm: card.action === 'delete' ? $('threat-dialog-confirm').value : undefined };
+  if (card.device_id !== threatDeviceId) return;
+  const body = { finding_id: card.finding_id, action: card.action, pid: card.pid, approval_id: card.approval_id, confirm: card.action === 'delete' ? $('threat-dialog-confirm').value : undefined };
   try {
     const job = await readJson(await fetch(threatPath('/actions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
     threatResult(card.finding_id, `${card.label} is running on the device...`, true);
@@ -3249,7 +3258,11 @@ async function sendThreatChat(event) {
   event.preventDefault();
   const input = $('threat-chat-input');
   const text = input.value.trim();
-  if (!text || !threatDeviceId) return;
+  if (!text || !threatDeviceId || threatChatBusy) return;
+  const chatDevice = threatDeviceId;
+  threatChatBusy = true;
+  const sendButton = $('threat-chat-form').querySelector('button');
+  sendButton.disabled = true;
   input.value = '';
   addThreatChat('user', text);
   const thinking = document.createElement('div');
@@ -3257,12 +3270,18 @@ async function sendThreatChat(event) {
   thinking.innerHTML = '<span class="spinner"></span>Thinking...';
   $('threat-chat-messages').appendChild(thinking);
   try {
-    const data = await readJson(await fetch(threatPath('/chat'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, session_id: 'dashboard' }) }));
+    const data = await readJson(await fetch(threatPath('/chat'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, session_id: threatConversationId }) }));
     thinking.remove();
+    if (chatDevice !== threatDeviceId) return;
+    threatConversationId = data.session_id;
     addThreatChat('assistant', data.reply, data.proposal);
+    if (data.investigation && window.showSecurityInvestigation) window.showSecurityInvestigation(data.investigation);
   } catch (error) {
     thinking.remove();
-    addThreatChat('assistant', friendlyError(error));
+    if (chatDevice === threatDeviceId) addThreatChat('assistant', friendlyError(error));
+  } finally {
+    threatChatBusy = false;
+    sendButton.disabled = false;
   }
 }
 

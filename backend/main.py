@@ -42,6 +42,7 @@ from .rules_engine import evaluate_event_log_rules, evaluate_performance_rules, 
 from .security_checks import collect_security_report
 from .task_queue import claim_next_task, complete_task, get_task, list_tasks, pending_change
 from .workers import diagnosis_limit, int_env, run_ai, run_monitor
+from . import intelligence, security_agent, security_api, security_chat, security_store, security_samples
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -52,6 +53,9 @@ async def lifespan(_app):
 
 app = FastAPI(title="AIops Device Health Monitor", lifespan=lifespan)
 app.include_router(virustotal.router)
+app.include_router(intelligence.router)
+app.include_router(security_api.router)
+app.include_router(security_samples.router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -183,6 +187,8 @@ async def start_monitor():
     asyncio.create_task(security_loop())
     asyncio.create_task(event_log_loop())
     asyncio.create_task(threat_loop())
+    asyncio.create_task(security_agent.loop())
+    asyncio.create_task(intelligence.worker())
 
 
 def prepare_ai(reason):
@@ -476,6 +482,7 @@ def agent_report(payload: dict, request: Request):
 
     timestamp = datetime.now(timezone.utc).isoformat()  # received at; the agent's clock may be off
     save_report(device_id, timestamp, diagnostics_payload, payload.get("spike_detected", False))
+    security_store.job_create(device_id, kind="baseline")
     if onboarding_enabled():
         _ensure_onboarding(device)
     return {"accepted": True, "device_id": device_id, "alerts_created": len(alerts_for_report)}
@@ -1012,8 +1019,35 @@ async def threat_action(device_id: str, payload: dict):
         if confirm.lower() != str(card["confirm"]).lower():
             raise HTTPException(status_code=400, detail=f"Type the file name ({card['confirm']}) to confirm the permanent delete")
         args["confirm"] = confirm
+    if _change_in_progress(target.device_id):
+        raise HTTPException(409, detail="Wait for the current device change to finish")
+    if not security_store.approval_consume(str(payload.get("approval_id") or ""), target.device_id, _threat_binding(analysis, finding, card)):
+        raise HTTPException(409, detail="Approval expired, was already used, or no longer matches this scan. Review the finding again.")
     name = f"{card['label']}: {finding['title']}"[:200]
     return _start_software_job(target, f"threat-{action}", name, threat_rules.ACTION_TOOLS[action], args, threat_rules.ACTION_RISK[action])
+
+
+def _threat_binding(analysis, finding, card):
+    return {"scan_id": analysis.get("scan_id"), "finding_key": finding["dedup_key"], "item_id": finding.get("item_id"),
+            "path": finding.get("path"), "action": card["action"], "pid": card.get("pid"), "proof": finding.get("proof", [])}
+
+
+def _bind_threat_card(device_id, analysis, card):
+    finding = threat_rules.find(analysis, card["finding_id"])
+    return {**card, "device_id": device_id, "scan_id": analysis.get("scan_id"),
+            "approval_id": security_store.approval_issue(device_id, _threat_binding(analysis, finding, card))}
+
+
+@app.post("/api/threats/{device_id}/proposal")
+def threat_proposal(device_id: str, payload: dict):
+    target = _threat_target(device_id)
+    analysis, finding = _current_finding(target, payload.get("finding_id"))
+    if payload.get("scan_id") != analysis.get("scan_id"):
+        raise HTTPException(409, detail="The scan changed; refresh and review the finding")
+    card = threat_rules.proposal(analysis, finding["id"], payload.get("action"), payload.get("pid"))
+    if not card:
+        raise HTTPException(400, detail="This action is not offered for the finding")
+    return _bind_threat_card(target.device_id, analysis, card)
 
 
 @app.post("/api/threats/{device_id}/marks")
@@ -1060,32 +1094,44 @@ def threat_chat_endpoint(device_id: str, payload: dict):
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
     analysis, _ = _threat_analysis(target)
-    if not analysis:
-        raise HTTPException(status_code=404, detail="Scan this device first")
+    analysis = analysis or {"findings": [], "unreadable": [], "platform": target.os_type, "scan_id": None}
+    intent = security_chat.intent(message)
     asked_id, asked_action = threat_rules.parse_request(message, analysis)
-    history_key = f"threat:{payload.get('session_id', 'default')}:{target.device_id}"
-    history = chat_sessions.setdefault(history_key, [])
+    session_id, history_key, history = security_chat.history(payload, target.device_id, "threat")
     source, reply, card = "rules", None, None
-    if is_ai_available():
+    investigation = None
+    if intent == "unrelated":
+        reply = security_chat.REDIRECT
+    elif intent == "greeting":
+        reply = "Hello. I can help with IT and security questions, or investigate this device's security evidence."
+    elif intent == "investigation":
+        if target.status == "online":
+            investigation = security_store.job_create(target.device_id, question=message)
+            reply = "A read-only security investigation is queued. Its results will identify collected evidence and any missing checks."
+        else:
+            reply = "This device is offline, so I cannot gather fresh evidence. I can still explain technical questions and existing findings."
+    elif is_ai_available():
         try:
             answer = threat_chat(message, analysis, history, think=bool(payload.get("think")))
             reply, source = answer["reply"], "ai"
-            card = threat_rules.proposal(analysis, answer["finding_id"], answer["action"], answer["pid"])
+            if intent == "action" and asked_action == answer["action"] and asked_id == answer["finding_id"]:
+                card = threat_rules.proposal(analysis, answer["finding_id"], answer["action"], answer["pid"])
         except (AIModelUnavailableError, AIUnavailableError) as error:
             reply = f"The AI is not available ({error})."
-    if card is None and asked_action:
+    if intent == "action" and card is None and asked_action:
         card = threat_rules.proposal(analysis, asked_id, asked_action)
     if not reply:
-        actionable = ", ".join(f"{finding['id']} ({'/'.join(item['action'] for item in finding['actions'])})" for finding in analysis["findings"] if finding["actions"])
         reply = (f"Ready to {card['label'].lower()} {card['finding_id']} ({card['title']}). Approve it below to run it." if card else
-                 "Name a finding and an action, for example \"quarantine T1\"." + (f" Findings with actions: {actionable}." if actionable else " No finding in this scan offers an action."))
+                 "The technical assistant is unavailable right now. Your question does not require an action command; try again when the model is available.")
     elif card is None and asked_action and asked_id:
         reply += f" ({asked_action} is not available for {asked_id}: see its suggested steps.)"
-    history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
-    chat_sessions[history_key] = history[-6:]
+    if card:
+        card = _bind_threat_card(target.device_id, analysis, card)
+    security_chat.remember(history_key, history, message, reply)
     if source == "ai":
         _record_ai("threat_chat", target.device_id, bool(payload.get("think")), {"question": message[:500], "summary": reply, "proposal": card})
-    return {"reply": reply, "proposal": card, "source": source}
+    return {"reply": reply, "proposal": card, "source": source, "session_id": session_id, "intent": intent,
+            "evidence_refs": [row["id"] for row in analysis["findings"] if row["id"] in reply], "investigation": investigation}
 
 
 @app.post("/api/agents/{device_id}/os-updates/install")
@@ -1430,8 +1476,6 @@ def chat_status():
 
 @app.post("/api/agent/chat")
 def agent_chat(payload: dict):
-    if not is_ai_available():
-        raise HTTPException(status_code=503, detail=ai_status().get("message", "AI technician unavailable"))
     message = str(payload.get("message", "")).strip()
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
@@ -1475,13 +1519,18 @@ def agent_chat(payload: dict):
     history = normalize_chat_history(payload["conversation_history"] if client_history else chat_sessions.get(session_key, []))
     try:
         think = bool(payload.get("think"))
-        reply = chat(message, report, history, think=think, context=context)
+        intent = security_chat.intent(message)
+        if intent in ("unrelated", "greeting") or not is_ai_available():
+            answer = security_chat.REDIRECT if intent == "unrelated" else "Hello. I can help with technical IT and security questions." if intent == "greeting" else "The technical assistant is unavailable right now. Please try again when the model is available; no device action has been performed."
+            reply = {"plain_explanation": answer, "technical_root_cause": "", "recommendations": []}
+        else:
+            reply = chat(message, report, history, think=think, context=context)
         if not client_history:
             history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
             chat_sessions[session_key] = normalize_chat_history(history)
         _record_ai("chat_answer", device_id or LOCAL_DEVICE_ID, think, {"question": message[:500], "summary": reply.get("plain_explanation"),
                    "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations"), "device_context": context})
-        return {"reply": reply, "session_id": session_id, "device_context": context}
+        return {"reply": reply, "session_id": session_id, "device_context": context, "intent": intent, "evidence_refs": [], "investigation": None}
     except AIModelUnavailableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AIUnavailableError as error:

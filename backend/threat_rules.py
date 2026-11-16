@@ -404,6 +404,9 @@ def parse_request(message, analysis):
     """(finding_id, action) asked for in plain words, e.g. "quarantine T1" or "T2 ko delete karo"; Nones when unclear.
     Without a finding id, the only finding that offers actions is meant."""
     text = str(message or "")
+    from .security_chat import intent
+    if intent(text) != "action":
+        return None, None
     action = next((name for name, pattern in ACTION_WORDS if pattern.search(text)), None)
     ids = [f"T{number}" for number in re.findall(r"(?i)\bT(\d{1,3})\b", text)]
     if not ids:
