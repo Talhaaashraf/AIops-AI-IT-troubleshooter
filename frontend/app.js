@@ -3128,7 +3128,7 @@ function renderThreatFinding(finding) {
       <h4>Suggested action path</h4>
       <ol class="threat-steps">${steps}</ol>
       ${links}
-      ${reputationHash ? `<button type="button" class="ghost-button" data-vt-hash="${reputationHash}">Check hash with VirusTotal</button>` : ''}
+      ${reputationHash ? `<button type="button" class="ghost-button" data-vt-hash="${reputationHash}">Check hash reputation</button>` : ''}
       <p class="threat-result hidden" id="threat-result-${escapeHtml(finding.id)}"></p>
       <footer class="button-row">${marks}</footer>
     </article>`;

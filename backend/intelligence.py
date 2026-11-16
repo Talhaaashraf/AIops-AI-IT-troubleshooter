@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 import threading
@@ -52,73 +53,83 @@ def status(provider):
     with store.connect() as db:
         minute = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, time.time()-60)).fetchone()[0]
         day = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, time.time()-86400)).fetchone()[0]
+    # An unusable master key is reported to the operator, never turned into a failing settings page.
     try:
-        configured, error = bool(vault.get(provider)), None
+        configured, error, storage = bool(vault.get(provider)), None, vault.mode()
     except HTTPException as exc:
-        configured, error = False, exc.detail
+        configured, error, storage = False, exc.detail, "unavailable"
     return {"provider": provider, "configured": configured, "enabled": bool(configured and rules["enabled"] and rules["business_authorized"]), "policy": rules,
-            "storage": vault.mode(), "credential_error": error, "usage": {"minute": minute, "day": day},
+            "storage": storage, "credential_error": error, "usage": {"minute": minute, "day": day},
             "connection": store.state_get("connection:" + provider, {"state": "untested"}),
             "capabilities": store.state_get("capabilities:" + provider, {"verified": False})}
 
 
 def configure(provider, payload):
-    rules = policy(provider)
-    before = {name: rules[name] for name in ("enabled", "business_authorized", "upload_authorized", "use_basis")}
-    if "business_authorized" in payload:
-        if not isinstance(payload["business_authorized"], bool):
-            raise HTTPException(400, "Business-use authorization must be a boolean")
-        basis = str(payload.get("use_basis", "")).strip()
-        if payload["business_authorized"] and len(basis) < 20:
-            raise HTTPException(400, "Record the licence or provider permission that permits this office/business use")
-        rules.update(business_authorized=payload["business_authorized"], use_basis=basis[:500])
-    for name in ("enabled", "upload_authorized"):
-        if name in payload:
-            if type(payload[name]) is not bool:
-                raise HTTPException(400, f"{name} must be a boolean")
-            rules[name] = payload[name]
-    if rules["enabled"] and not rules["business_authorized"]:
-        raise HTTPException(400, "Record provider permission for this business workflow before enabling it")
-    for name, maximum in (("per_minute", 100), ("per_day", 100000)):
-        if name in payload:
-            value = payload[name]
-            if type(value) is not int or not 1 <= value <= maximum:
-                raise HTTPException(400, f"Invalid {name} budget")
-            rules[name] = value
-    key = payload.get("api_key")
-    if key is not None and (not isinstance(key, str) or key and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", key)):
-        raise HTTPException(400, "Invalid API key format")
-    key_changed = key is not None
-    if key_changed and not key:
-        rules["enabled"] = False
-    # Budget-only edits keep staged samples, in-flight work and cached reports; credential or
-    # permission changes invalidate approvals and in-flight results via a new generation.
-    permission_changed = any(rules[name] != value for name, value in before.items())
+    # Read, validate and write under one lock so concurrent edits can never undo a revocation.
     # Lock order is provider/configuration, then sample lock, throughout submission.
     with _lock:
+        rules = policy(provider)
+        before = {name: rules[name] for name in ("enabled", "business_authorized", "upload_authorized", "use_basis")}
+        if "business_authorized" in payload:
+            if not isinstance(payload["business_authorized"], bool):
+                raise HTTPException(400, "Business-use authorization must be a boolean")
+            basis = str(payload.get("use_basis", "")).strip()
+            if payload["business_authorized"] and len(basis) < 20:
+                raise HTTPException(400, "Record the licence or provider permission that permits this office/business use")
+            rules.update(business_authorized=payload["business_authorized"], use_basis=basis[:500])
+        for name in ("enabled", "upload_authorized"):
+            if name in payload:
+                if type(payload[name]) is not bool:
+                    raise HTTPException(400, f"{name} must be a boolean")
+                rules[name] = payload[name]
+        if rules["enabled"] and not rules["business_authorized"]:
+            raise HTTPException(400, "Record provider permission for this business workflow before enabling it")
+        for name, maximum in (("per_minute", 100), ("per_day", 100000)):
+            if name in payload:
+                value = payload[name]
+                if type(value) is not int or not 1 <= value <= maximum:
+                    raise HTTPException(400, f"Invalid {name} budget")
+                rules[name] = value
+        key = payload.get("api_key")
+        if key is not None and (not isinstance(key, str) or key and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", key)):
+            raise HTTPException(400, "Invalid API key format")
+        key_changed = key is not None
+        if key_changed and not key:
+            rules["enabled"] = False
+        # Budget-only edits keep staged samples, in-flight work and cached reports; credential or
+        # permission changes invalidate approvals and in-flight results via a new generation.
+        permission_changed = any(rules[name] != value for name, value in before.items())
         if key_changed or permission_changed:
             from .security_samples import clear
             clear(provider)
             rules["generation"] = secrets.token_hex(12)
         if key_changed:
+            # A new account: its own backoff, and analyses of the previous account are not polled with it.
+            rules.update(retry_at=0, key_generation=secrets.token_hex(12))
             vault.put(provider, key)
             store.state_set("capabilities:" + provider, {"verified": False})
             store.state_set("connection:" + provider, {"state": "untested"})
         store.state_set("provider:" + provider, rules)
         if key_changed:
             with store.connect() as db:
-                db.execute("DELETE FROM security_state WHERE name LIKE ?", (f"report:{provider}:%",))
+                db.execute("DELETE FROM security_state WHERE name >= ? AND name < ?", (f"report:{provider}:", f"report:{provider};"))
                 # Results obtained with the previous key are stale: the next request re-queues them.
-                db.execute("UPDATE intelligence_jobs SET due=0 WHERE provider=? AND state IN ('completed','restricted','failed','disabled')", (provider,))
+                db.execute("UPDATE intelligence_jobs SET due=0 WHERE provider=? AND state IN ('completed','restricted','failed','disabled','retry')", (provider,))
         store.audit("provider_settings", provider=provider, enabled=rules["enabled"], business_authorized=rules["business_authorized"], upload_authorized=rules["upload_authorized"])
     return status(provider)
 
 
-def _reserve(provider):
-    rules = policy(provider)
-    if not rules["enabled"] or not rules.get("business_authorized"):
-        raise HTTPException(403, "Provider disabled: verify permission for this office/business use before enabling it")
-    key = vault.get(provider)
+def _reserve(provider, expect=None):
+    """Return the key to use. `expect` binds the call to an approval: the configuration generation it was
+    granted under, and whether upload permission is required. Key and generation are read atomically."""
+    with _lock:
+        rules = policy(provider)
+        if not rules["enabled"] or not rules.get("business_authorized"):
+            raise HTTPException(403, "Provider disabled: verify permission for this office/business use before enabling it")
+        expect = expect or {}
+        if any(name in expect and rules.get(name) != expect[name] for name in ("generation", "key_generation")) or (expect.get("upload") and not rules.get("upload_authorized")):
+            raise HTTPException(409, "Provider configuration changed after approval; approval must be renewed")
+        key, key_generation = vault.get(provider), rules.get("key_generation")
     if not key:
         raise HTTPException(409, "Provider API key is not configured")
     now = time.time()
@@ -131,11 +142,11 @@ def _reserve(provider):
         if minute >= rules["per_minute"] or day >= rules["per_day"]:
             raise HTTPException(429, "Shared provider request budget reached", headers={"Retry-After": "60" if day < rules["per_day"] else "3600"})
         db.execute("INSERT INTO intelligence_usage VALUES (?,?)", (provider, now))
-    return key
+    return key, key_generation
 
 
-def request(provider, method, path, **kwargs):
-    key = _reserve(provider)
+def request(provider, method, path, expect=None, **kwargs):
+    key, key_generation = _reserve(provider, expect)
     headers = {"x-apikey": key} if provider == "virustotal" else {"api-key": key, "User-Agent": "Falcon Sandbox"}
     try:
         with httpx.Client(timeout=40, follow_redirects=False, trust_env=False) as client:
@@ -148,9 +159,11 @@ def request(provider, method, path, **kwargs):
                 seconds = max(1, min(86400, int(delay)))
             except ValueError:
                 seconds = 60
-            rules = policy(provider)
-            rules["retry_at"] = time.time() + seconds
-            store.state_set("provider:" + provider, rules)
+            with _lock:  # Fresh read: only the backoff changes, never a concurrent settings edit.
+                rules = policy(provider)
+                if rules.get("key_generation") == key_generation:  # A late 429 for a replaced key is not the new key's.
+                    rules["retry_at"] = time.time() + seconds
+                    store.state_set("provider:" + provider, rules)
             store.state_set("connection:" + provider, {**store.state_get("connection:" + provider, {}), "state": "rate_limited", "checked_at": time.time()})
             raise HTTPException(429, "Provider rate limit reached", headers={"Retry-After": str(seconds)})
         if response.status_code in (401, 403):
@@ -233,14 +246,16 @@ async def worker():
     # All SQLite and provider I/O runs in threads so the event loop never blocks on it.
     from .intelligence_jobs import tick, recover
     from .security_samples import maintain, reconcile
-    await asyncio.to_thread(recover)
-    await asyncio.to_thread(reconcile, True)
+    try:
+        await asyncio.to_thread(recover)
+        await asyncio.to_thread(reconcile, True)
+    except Exception:
+        logging.getLogger(__name__).exception("Intelligence startup recovery failed; the queue keeps running")
     while True:
         try:
             await asyncio.to_thread(tick)
             await asyncio.to_thread(maintain)
         except Exception:
-            import logging
             logging.getLogger(__name__).exception("Intelligence queue iteration failed")
         await asyncio.sleep(5)
 

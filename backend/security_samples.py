@@ -123,7 +123,8 @@ def _claim(provider, token, payload):
                 raise HTTPException(409, "Duplicate submission refused; inspect the existing analysis")
             db.execute("INSERT OR REPLACE INTO intelligence_submissions VALUES (?,?,?,?)", (provider, item["sha256"], token, "submitting"))
         item = _stages.pop(token)
-    record = {**item["binding"], "state": "submitting", "approved_at": time.time(), "environment_id": environment}
+    record = {**item["binding"], "state": "submitting", "approved_at": time.time(), "environment_id": environment,
+              "key_generation": intel.policy(provider).get("key_generation")}
     # Durable state before network I/O: ambiguous uploads can never be retried automatically.
     store.state_set("submission:" + token, record)
     return item, record
@@ -131,12 +132,15 @@ def _claim(provider, token, payload):
 
 def _submit(provider, token, item, record):
     environment = record["environment_id"]
-    store.audit("sample_upload_approved", provider=provider, sha256=item["sha256"], token=token, state="submitting")
     try:
+        store.audit("sample_upload_approved", provider=provider, sha256=item["sha256"], token=token, state="submitting")
         kwargs = {"files": {"file": (item["sha256"] + ".bin", item["bytes"], "application/octet-stream")}}
         if provider == "hybrid_analysis":
             kwargs["data"] = {"environment_id": str(environment)}
-        raw = intel.request(provider, "POST", "/files" if provider == "virustotal" else "/submit/file", **kwargs)
+        # Re-checked at send time under the configuration lock: a key rotation or upload revocation after
+        # the claim refuses the send instead of using another account's key.
+        raw = intel.request(provider, "POST", "/files" if provider == "virustotal" else "/submit/file",
+                            expect={"generation": record["configuration"], "upload": True}, **kwargs)
         identity = (raw or {}).get("data", {}).get("id") if provider == "virustotal" else (raw or {}).get("job_id")
         if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_=-]{1,300}", identity):
             raise HTTPException(502, "Submission outcome is unknown; look up the hash later instead of resubmitting")
@@ -177,13 +181,13 @@ def _active_rows():
     # Only unfinished submissions; finished records are kept for history but never rescanned.
     marks = ",".join("?" * len(ACTIVE))
     with store.connect() as db:
-        return db.execute(f"SELECT name,body FROM security_state WHERE name LIKE 'submission:%' AND json_extract(body,'$.state') IN ({marks})", ACTIVE).fetchall()
+        return db.execute(f"SELECT name,body FROM security_state WHERE name >= 'submission:' AND name < 'submission;' AND json_extract(body,'$.state') IN ({marks})", ACTIVE).fetchall()
 
 
 def _save(token, item):
     """Persist a submission record and keep the duplicate-guard table in the same state."""
-    store.state_set("submission:" + token, item)
     with store.connect() as db:
+        db.execute("INSERT OR REPLACE INTO security_state VALUES (?,?,?)", ("submission:" + token, time.time(), json.dumps(item)))
         db.execute("UPDATE intelligence_submissions SET state=? WHERE token=?", (item["state"], token))
 
 
@@ -201,18 +205,35 @@ def reconcile(restarting=False, rows=None):
             db.execute("UPDATE intelligence_submissions SET state='outcome_unknown' WHERE state='submitting'")
 
 
+POLLS_PER_PASS = 2  # Per provider: polling must leave most of the shared budget to hash lookups.
+
+
 def poll_due(rows=None):
+    providers, polled = {}, {}
     for row in _active_rows() if rows is None else rows:
         item = json.loads(row["body"])
         token = row["name"].split(":", 1)[1]
-        if item["state"] not in ("submitted", "analysing") or item.get("next_poll", 0) > time.time() or not intel.allowed(item["provider"]):
+        provider = item.get("provider")
+        if item["state"] not in ("submitted", "analysing") or item.get("next_poll", 0) > time.time():
+            continue
+        if provider not in providers:
+            try:
+                providers[provider] = intel.policy(provider).get("key_generation") if intel.allowed(provider) else False
+            except HTTPException:
+                providers[provider] = False
+        if providers[provider] is False or polled.get(provider, 0) >= POLLS_PER_PASS:
             continue
         if time.time() - item.get("approved_at", 0) > 3600:
             _save(token, {**item, "state": "outcome_unknown", "detail": "Polling deadline reached; look up the hash later"})
             continue
-        provider = item["provider"]
+        if item.get("key_generation") != providers[provider]:
+            _save(token, {**item, "state": "outcome_unknown", "detail": "Provider API key changed after submission; look up the hash instead"})
+            continue
+        polled[provider] = polled.get(provider, 0) + 1
         try:
-            raw = intel.request(provider, "GET", "/analyses/" + item["analysis_id"] if provider == "virustotal" else "/report/" + item["analysis_id"] + "/summary")
+            # Bound to the submitting account's key: a rotation mid-pass refuses instead of using the new key.
+            raw = intel.request(provider, "GET", "/analyses/" + item["analysis_id"] if provider == "virustotal" else "/report/" + item["analysis_id"] + "/summary",
+                                expect={"key_generation": item.get("key_generation")})
             if provider == "virustotal":
                 from .virustotal import _report
                 report = _report(raw, item["sha256"])
@@ -224,6 +245,8 @@ def poll_due(rows=None):
             item.update(state="failed" if provider == "hybrid_analysis" and raw.get("state") == "ERROR" else "completed" if complete else "analysing", report=report, next_poll=time.time() + 60)
         except HTTPException as error:
             item.update(detail=error.detail, next_poll=time.time() + 120)
+            if error.status_code in (429, 502, 503):
+                providers[provider] = False  # Rate limited or unreachable: stop polling it this pass.
         _save(token, item)
 
 

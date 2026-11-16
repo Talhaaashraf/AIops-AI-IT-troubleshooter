@@ -1,8 +1,10 @@
 """Versioned, bounded security state. Never stores provider credentials or sample bytes."""
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
+import threading
 import time
 
 from .config import DB_PATH
@@ -18,9 +20,36 @@ class Connection(sqlite3.Connection):
             self.close()
 
 
+_schema_ready = set()
+_schema_lock = threading.Lock()
+
+
 def connect():
     db = sqlite3.connect(DB_PATH, timeout=10, factory=Connection)
     db.row_factory = sqlite3.Row
+    # The schema script costs ~1 ms; run it once per database file per process, not on every connection.
+    # The file identity is part of the key, so a database deleted or replaced at the same path is set up again.
+    try:
+        if _file_identity() not in _schema_ready:
+            with _schema_lock:
+                if _file_identity() not in _schema_ready:
+                    _create_schema(db)
+                    _schema_ready.add(_file_identity() or ())  # () never matches a real identity
+    except BaseException:
+        db.close()
+        raise
+    return db
+
+
+def _file_identity():
+    try:
+        info = os.stat(DB_PATH)
+    except OSError:
+        return None  # Not created yet: never cached, so the schema runs.
+    return (str(DB_PATH), info.st_ino, info.st_ctime_ns)
+
+
+def _create_schema(db):
     db.executescript("""
     CREATE TABLE IF NOT EXISTS security_jobs (
       id TEXT PRIMARY KEY, device TEXT NOT NULL, policy TEXT NOT NULL, kind TEXT NOT NULL,
@@ -35,6 +64,7 @@ def connect():
     CREATE TABLE IF NOT EXISTS security_approvals (id TEXT PRIMARY KEY, device TEXT, expires REAL, state TEXT, body TEXT);
     CREATE TABLE IF NOT EXISTS intelligence_jobs (id TEXT PRIMARY KEY, provider TEXT, hash TEXT, operation TEXT,
       state TEXT, due REAL, created REAL, body TEXT, UNIQUE(provider,hash,operation));
+    CREATE INDEX IF NOT EXISTS intelligence_jobs_claim ON intelligence_jobs(state,due);
     CREATE TABLE IF NOT EXISTS intelligence_usage (provider TEXT, stamp REAL);
     CREATE INDEX IF NOT EXISTS intelligence_usage_provider ON intelligence_usage(provider,stamp);
     CREATE TABLE IF NOT EXISTS intelligence_credentials (provider TEXT PRIMARY KEY, ciphertext TEXT NOT NULL);
@@ -44,7 +74,6 @@ def connect():
     CREATE TABLE IF NOT EXISTS intelligence_submissions (provider TEXT, hash TEXT, token TEXT, state TEXT,
       PRIMARY KEY(provider,hash));
     """)
-    return db
 
 
 def audit(operation, **metadata):

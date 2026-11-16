@@ -45,6 +45,21 @@ rm -rf "$TEMP/aiops-pw"   # when done
 It collects JavaScript errors, checks every tab against the real server (sample data is served only for the
 AI-analysis text and the software table, so no slow model call or real uninstall happens) and saves screenshots.
 
+## Threat-intelligence panel (mocked, no server)
+
+`intelligence_browser.cjs` drives the Threat Intelligence panel in a headless browser with every
+`/api/threat-intelligence` call mocked, so no provider key, quota or sample ever leaves the machine. It needs Node
+and the npm `playwright` package (the repo has no `package.json`, so install it in a temp folder):
+
+```bash
+mkdir -p "$TEMP/aiops-node" && cd "$TEMP/aiops-node" && npm init -y && npm i playwright && npx playwright install chromium-headless-shell
+NODE_PATH="$TEMP/aiops-node/node_modules" node <repo>/tests/e2e/intelligence_browser.cjs
+rm -rf "$TEMP/aiops-node"   # when done
+```
+
+PASS prints `{ checks: 10, passed: 10, errors: [] }` and exits 0. Real provider calls are only for an operator with
+recorded provider permission and a real key: Save, Test connection, then search a known hash.
+
 ## Clean up after test tickets
 
 Every diagnosis is stored as a learned case, and resolved ones teach the AI. Test tickets with made-up

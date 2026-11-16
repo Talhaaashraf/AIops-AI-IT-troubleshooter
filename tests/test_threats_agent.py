@@ -219,7 +219,28 @@ def test_scan_hashing_is_lock_free_and_bounded(tmp_path, monkeypatch):
     assert security_monitor._candidates is process_candidates and process_candidates == {"proc": "/kept"}
 
 
-def test_fit_includes_intelligence_hashes():
-    data = {"items": [], "intelligence_hashes": {"files": [{"sha256": "a" * 64, "path": "x" * 1000} for _ in range(400)]}}
-    fitted = threats._fit(data)
-    assert len(json.dumps(fitted)) <= threats.DATA_LIMIT and fitted["truncated"] and fitted["intelligence_hashes"]["files"]
+def test_fit_includes_intelligence_hashes_and_trims_them_before_findings():
+    items = [{"id": f"d{index}", "kind": "malware", "objects": [], "path": "p" * 500} for index in range(100)]
+    hashes = [{"sha256": "a" * 64, "path": "x" * 1000, "item_id": f"d{index % 100}"} for index in range(400)]
+    fitted = threats._fit({"items": items, "intelligence_hashes": {"files": hashes}})
+    assert len(json.dumps(fitted)) <= threats.DATA_LIMIT and fitted["truncated"]
+    assert len(fitted["items"]) == 100  # every finding kept; only enrichment was trimmed
+    assert fitted["intelligence_hashes"]["files"]
+    kept = [{"id": "d0", "kind": "malware", "objects": [], "path": "p" * 120_000}]
+    fitted = threats._fit({"items": kept, "intelligence_hashes": {"files": [{"sha256": "a" * 64, "item_id": "d0"}]}})
+    assert fitted["items"] == [] and fitted["intelligence_hashes"]["files"] == []  # no hash for a dropped finding
+
+
+def test_signature_check_never_puts_the_path_in_the_script(tmp_path, monkeypatch):
+    from agent.toolkit import security_monitor
+    path = tmp_path / "a’; Write-Output INJECTED; ’.exe"
+    path.write_bytes(b"inert")
+    calls = []
+    monkeypatch.setattr(security_monitor, "os_name", lambda: "Windows")
+    monkeypatch.setattr(security_monitor, "_safe_path", lambda candidate: True)
+    monkeypatch.setattr(security_monitor, "_run", lambda args, timeout=20, env=None: calls.append((args, env)) or (0, '{"Status": 0}'))
+    result = security_monitor._hash_paths([("p1", str(path))])
+    assert result["files"] and calls
+    args, env = calls[0]
+    assert str(path) not in " ".join(args) and "INJECTED" not in " ".join(args)
+    assert env["SENTINEL_SIG_PATH"] == str(path)

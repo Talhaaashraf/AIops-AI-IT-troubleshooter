@@ -138,11 +138,12 @@ async def run(identity):
                 correlate(target.device_id, [{"id": job["id"] + step["tool"], "source": "processes" if step["tool"] == "security_processes" else "persistence", "snapshot": data}])
             if step["tool"] == "threat_scan":
                 from .main import _after_threat_scan
-                _after_threat_scan(target, True, step["result"].get("summary", ""), data)
+                # SQLite work and alerting run off the event loop (they can wait on the 10 s busy timeout).
+                await asyncio.to_thread(_after_threat_scan, target, True, step["result"].get("summary", ""), data)
             if step["tool"] == "security_hashes":
                 try:
                     from .intelligence_jobs import observe
-                    observe(target.device_id, data.get("files", []), job["id"])
+                    await asyncio.to_thread(observe, target.device_id, data.get("files", []), job["id"])
                 except Exception:
                     logging.getLogger(__name__).exception("Recording investigation hashes for intelligence lookups failed")
         job["evidence"] = [{"id": str(index + 1), "tool": row["tool"], "summary": row.get("result", {}).get("summary"), "ok": row.get("result", {}).get("ok", False)} for index, row in enumerate(job["steps"])]
@@ -177,6 +178,7 @@ def explain(job):
 
 
 async def loop():
+    cleanup_due = 0
     while True:
         try:
             for job in store.pending_jobs():
@@ -186,7 +188,10 @@ async def loop():
                     # Await each launch boundary so the concurrency cap takes effect.
                     asyncio.create_task(run(job["id"]))
                     await asyncio.sleep(0)
-            store.cleanup()
+            if time.monotonic() >= cleanup_due:
+                # Retention cleanup scans whole tables: run it in a thread, every 10 minutes.
+                await asyncio.to_thread(store.cleanup)
+                cleanup_due = time.monotonic() + 600
         except Exception:
             import logging
             logging.getLogger(__name__).exception("Security scheduler iteration failed")

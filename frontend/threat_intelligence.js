@@ -138,7 +138,10 @@
     if (!current(ctx)) return;
     sample = result.upload_token ? {token: result.upload_token, provider, ctx, sha: result.sha256, size: result.size} : null;
     analysis = result.analysis_token ? {token: result.analysis_token, provider, ctx} : analysis;
-    textResult('ti-sample', `${providers[provider]} · SHA-256 ${result.sha256 || ''} · ${result.size || ''} bytes · ${result.status || 'unknown'} · ${result.detail || result.note || ''}`);
+    // A file the provider already knows comes back as its report (no upload offered): show the verdict too.
+    const parts = [providers[provider], `SHA-256 ${result.sha256 || ''}`, result.size ? `${result.size} bytes` : '', result.status || 'unknown',
+      result.classification ? `classification: ${result.classification}` : '', result.detail || result.note || ''];
+    textResult('ti-sample', parts.filter(Boolean).join(' · '));
     $('ti-approval').hidden = !sample; $('ti-analysis').hidden = !analysis;
     $('ti-environment-label').hidden = provider !== 'hybrid_analysis';
     $('ti-environment').replaceChildren();

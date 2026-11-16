@@ -20,26 +20,31 @@ def job(identity):
     return value
 
 
+def _enqueue(db, provider, sha, operation, body, now):
+    identity = hashlib.sha256((provider + sha + operation).encode()).hexdigest()
+    row = db.execute("SELECT state,due FROM intelligence_jobs WHERE id=?", (identity,)).fetchone()
+    if not row:
+        db.execute("INSERT INTO intelligence_jobs VALUES (?,?,?,?,?,?,?,?)", (identity, provider, sha, operation, "queued", now, now, json.dumps(body or {})))
+    elif row["state"] in ("completed", "restricted", "disabled", "failed") and (row["due"] <= now or operation == "capability" or row["state"] == "disabled"):
+        db.execute("UPDATE intelligence_jobs SET state='queued',due=?,body=? WHERE id=?", (now, json.dumps(body or {}), identity))
+    return identity
+
+
 def enqueue(provider, sha, operation="lookup", body=None):
     intel.policy(provider)
     if operation == "lookup":
         sha = intel.valid_hash(sha)
-    identity = hashlib.sha256((provider + sha + operation).encode()).hexdigest()
-    now = time.time()
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute("SELECT state,due FROM intelligence_jobs WHERE id=?", (identity,)).fetchone()
-        if not row:
-            db.execute("INSERT INTO intelligence_jobs VALUES (?,?,?,?,?,?,?,?)", (identity, provider, sha, operation, "queued", now, now, json.dumps(body or {})))
-        elif row["state"] in ("completed", "restricted", "disabled", "failed") and (row["due"] <= now or operation == "capability" or row["state"] == "disabled"):
-            db.execute("UPDATE intelligence_jobs SET state='queued',due=?,body=? WHERE id=?", (now, json.dumps(body or {}), identity))
-    return identity
+        return _enqueue(db, provider, sha, operation, body, time.time())
 
 
 def observe(device, files, investigation=None):
     # Agent output is untrusted: malformed rows are skipped, never allowed to abort the caller.
     rows = []
-    for row in (files or [])[:25]:
+    if not isinstance(files, list):
+        return
+    for row in files[:25]:
         if not isinstance(row, dict):
             continue
         try:
@@ -52,11 +57,13 @@ def observe(device, files, investigation=None):
         rows.append((identity, device, sha, time.time(), json.dumps(body)))
     if not rows:
         return
+    now = time.time()
     with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         db.executemany("INSERT OR REPLACE INTO intelligence_observations VALUES (?,?,?,?,?)", rows)
-    for sha in dict.fromkeys(row[2] for row in rows):
-        for provider in intel.PROVIDERS:
-            enqueue(provider, sha)
+        for sha in dict.fromkeys(row[2] for row in rows):
+            for provider in intel.PROVIDERS:
+                _enqueue(db, provider, sha, "lookup", None, now)
 
 
 def recover():
@@ -85,13 +92,13 @@ def tick():
         rows = [dict(row) for row in db.execute(f"SELECT * FROM intelligence_jobs WHERE state IN ('queued','retry') AND due<=? AND provider IN ({marks}) ORDER BY CASE operation WHEN 'capability' THEN 0 ELSE 1 END,due LIMIT 20", (time.time(), *providers))]
     for row in rows:
         provider = row["provider"]
+        if provider not in _allowed_providers():
+            continue  # Disabled during this tick; stays queued and untouched.
+        with store.connect() as db:
+            claimed = db.execute("UPDATE intelligence_jobs SET state='running' WHERE id=? AND state IN ('queued','retry')", (row["id"],)).rowcount
+        if not claimed:
+            continue
         try:
-            if not intel.allowed(provider):
-                continue  # Disabled during this tick; stays queued.
-            with store.connect() as db:
-                claimed = db.execute("UPDATE intelligence_jobs SET state='running' WHERE id=? AND state IN ('queued','retry')", (row["id"],)).rowcount
-            if not claimed:
-                continue
             previous = json.loads(row["body"])
             if row["operation"] == "lookup":
                 result = intel.lookup(provider, row["hash"])

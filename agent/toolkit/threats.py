@@ -675,13 +675,17 @@ def _fit(data):
     for item in data["items"]:
         item["objects"] = item["objects"][:2]
         item.pop("threats", None) if len(item.get("threats") or []) > 3 else None
-    while data["items"] and len(json.dumps(data, default=str)) > DATA_LIMIT:
-        data["items"].pop()
-        data["truncated"] = True
+    # Findings drive alerts; external-lookup hashes are enrichment, so hashes go first.
     hashes = (data.get("intelligence_hashes") or {}).get("files")
     while hashes and len(json.dumps(data, default=str)) > DATA_LIMIT:
         hashes.pop()
         data["truncated"] = True
+    while data["items"] and len(json.dumps(data, default=str)) > DATA_LIMIT:
+        data["items"].pop()
+        data["truncated"] = True
+    if hashes:
+        kept = {item.get("id") for item in data["items"]}
+        hashes[:] = [row for row in hashes if row.get("item_id") in kept]
     return data
 
 

@@ -266,7 +266,8 @@ def test_disabled_provider_jobs_never_starve_an_enabled_one(transport):
 
 def submitted(provider='hybrid_analysis', token='t'*32):
     store.state_set('submission:'+token, {'provider': provider, 'sha256': FILE_SHA, 'state': 'submitted', 'analysis_id': 'b'*24,
-                                          'approved_at': time.time(), 'next_poll': 0, 'source': 'browser'})
+                                          'approved_at': time.time(), 'next_poll': 0, 'source': 'browser',
+                                          'key_generation': intel.policy(provider).get('key_generation')})
     with store.connect() as db:
         db.execute('INSERT INTO intelligence_submissions VALUES (?,?,?,?)', (provider, FILE_SHA, token, 'submitted'))
     return token
@@ -356,3 +357,136 @@ def test_upload_does_not_hold_the_configuration_lock_during_network(monkeypatch)
     monkeypatch.setattr(intel, 'request', network)
     samples.upload('virustotal', token, {'approved': True}, request())
     assert seen == [True]
+
+
+# Regressions for the QA-team findings (second round).
+
+@pytest.mark.parametrize('change', [{'api_key': 'n'*64}, {'upload_authorized': False}])
+def test_upload_refused_when_configuration_changes_between_claim_and_send(monkeypatch, transport, change):
+    token = stage(monkeypatch)['upload_token']
+    calls, _ = transport
+    submit = samples._submit
+    def changed_then_submit(*args):
+        intel.configure('virustotal', change)  # another operator edits settings right after the claim
+        return submit(*args)
+    monkeypatch.setattr(samples, '_submit', changed_then_submit)
+    with pytest.raises(HTTPException) as error:
+        samples.upload('virustotal', token, {'approved': True}, request())
+    assert error.value.status_code == 409 and not calls
+    assert samples.analysis('virustotal', token)['status'] == 'failed' and submission_state(token) == 'failed'
+
+
+def test_key_change_clears_the_previous_accounts_backoff(transport):
+    enable(); rules = intel.policy('virustotal'); rules['retry_at'] = time.time() + 86400
+    store.state_set('provider:virustotal', rules)
+    with pytest.raises(HTTPException): intel.lookup('virustotal', SHA)
+    intel.configure('virustotal', {'api_key': 'n'*64})
+    assert intel.lookup('virustotal', SHA)['found']
+
+
+def test_analyses_of_a_previous_key_are_not_polled_with_the_new_one(monkeypatch):
+    enable(); token = submitted('virustotal')
+    intel.configure('virustotal', {'api_key': 'n'*64})
+    monkeypatch.setattr(intel, 'request', lambda *a, **kw: pytest.fail('must not poll with another account key'))
+    samples.poll_due()
+    assert submission_state(token) == 'outcome_unknown'
+
+
+def test_polling_is_capped_per_pass(monkeypatch):
+    enable()
+    for index in range(5):
+        token = f'{index}'*32; submitted('virustotal', token)
+        with store.connect() as db:
+            db.execute('UPDATE intelligence_submissions SET hash=? WHERE token=?', (f'{index:064x}', token))
+    calls = []
+    monkeypatch.setattr(intel, 'request', lambda *a, **kw: calls.append(a) or {'data': {'attributes': {'status': 'queued'}}})
+    samples.poll_due()
+    assert len(calls) == samples.POLLS_PER_PASS
+
+
+def test_unreadable_credential_never_overwrites_an_unclaimed_job(monkeypatch):
+    enable(); identity = jobs.enqueue('virustotal', SHA)
+    calls = iter([True])
+    def allowed(provider):
+        if next(calls, False):
+            return True
+        raise HTTPException(503, 'credential unreadable')
+    monkeypatch.setattr(intel, 'allowed', allowed)
+    jobs.tick()
+    job = jobs.job(identity)
+    assert job['state'] == 'queued' and job['result'] == {}
+
+
+def test_observe_ignores_non_list_input():
+    for files in ({'sha256': SHA}, 7, None, 'text'):
+        jobs.observe('dev', files)
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM intelligence_observations').fetchone()[0] == 0
+
+
+def test_settings_page_reports_a_bad_master_key_instead_of_failing(monkeypatch):
+    monkeypatch.setenv('SENTINEL_INTELLIGENCE_MASTER_KEY', 'not-a-valid-fernet-key')
+    result = intel.status('virustotal')
+    assert result['configured'] is False and result['credential_error'] and result['storage'] == 'unavailable'
+
+
+# Regressions for the round-2 re-check.
+
+def test_a_poll_is_refused_if_the_key_rotates_mid_pass(monkeypatch, transport):
+    enable(); token = submitted('virustotal')
+    calls, _ = transport
+    reserve = intel._reserve
+    def rotate_then_reserve(provider, expect=None):
+        intel.configure('virustotal', {'api_key': 'n'*64})  # rotated after the pass read the key generation
+        return reserve(provider, expect)
+    monkeypatch.setattr(intel, '_reserve', rotate_then_reserve)
+    samples.poll_due()
+    monkeypatch.setattr(intel, '_reserve', reserve)
+    assert not calls and submission_state(token) == 'submitted'  # refused (409), marked on the next pass
+    record = store.state_get('submission:'+token); record['next_poll'] = 0; store.state_set('submission:'+token, record)
+    samples.poll_due()
+    assert submission_state(token) == 'outcome_unknown' and not calls
+
+
+def test_a_late_429_for_a_replaced_key_does_not_block_the_new_key(monkeypatch, transport):
+    enable(); calls, response = transport
+    response.update(status=429, headers={'Retry-After': '86400'})
+    reserve = intel._reserve
+    def reserve_then_rotate(provider, expect=None):
+        result = reserve(provider, expect)
+        intel.configure('virustotal', {'api_key': 'n'*64})  # the key is replaced while the request is in flight
+        return result
+    monkeypatch.setattr(intel, '_reserve', reserve_then_rotate)
+    with pytest.raises(HTTPException): intel.request('virustotal', 'GET', '/files/' + SHA)
+    assert intel.policy('virustotal')['retry_at'] == 0
+
+
+def test_polling_stops_for_a_provider_that_is_rate_limited(monkeypatch):
+    enable()
+    for index in range(3):
+        token = f'{index}'*32; submitted('virustotal', token)
+        with store.connect() as db:
+            db.execute('UPDATE intelligence_submissions SET hash=? WHERE token=?', (f'{index:064x}', token))
+    calls = []
+    def limited(*a, **kw):
+        calls.append(a); raise HTTPException(429, 'Provider rate limit reached')
+    monkeypatch.setattr(intel, 'request', limited)
+    samples.poll_due()
+    assert len(calls) == 1
+
+
+def test_key_change_requeues_retrying_jobs():
+    enable(); identity = jobs.enqueue('virustotal', SHA)
+    with store.connect() as db:
+        db.execute("UPDATE intelligence_jobs SET state='retry',due=? WHERE id=?", (time.time() + 3600, identity))
+    intel.configure('virustotal', {'api_key': 'n'*64})
+    assert jobs.job(identity)['due'] == 0
+
+
+def test_a_database_replaced_at_the_same_path_gets_its_schema_again():
+    import os
+    store.state_set('first', 1)
+    os.remove(store.DB_PATH)
+    assert store.state_get('first') is None
+    store.state_set('second', 2)
+    assert store.state_get('second') == 2

@@ -21,6 +21,7 @@ from .registry import tool
 
 _lock = threading.RLock()
 HASH_LIMIT = 25
+SIGNATURE_SCRIPT = "Get-AuthenticodeSignature -LiteralPath $env:SENTINEL_SIG_PATH | Select-Object Status | ConvertTo-Json -Compress"
 _candidates = {}
 _transport = None
 CHANNELS = ("Security", "System", "Microsoft-Windows-PowerShell/Operational", "Microsoft-Windows-Sysmon/Operational", "Microsoft-Windows-Windows Defender/Operational")
@@ -41,9 +42,9 @@ def scan_hashes(scan_id, items):
     return result
 
 
-def _run(args, timeout=20):
+def _run(args, timeout=20, env=None):
     try:
-        result = subprocess.run(args, capture_output=True, text=True, errors="replace", timeout=timeout,
+        result = subprocess.run(args, capture_output=True, text=True, errors="replace", timeout=timeout, env=env,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os_name() == "Windows" else 0)
         return result.returncode, result.stdout[:500000]
     except (OSError, subprocess.SubprocessError):
@@ -150,7 +151,10 @@ def _hash_paths(candidates, limit=HASH_LIMIT):
                         remaining = 10 - (time.monotonic() - started)
                         if remaining > 1:
                             if os_name() == "Windows":
-                                code, signed = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-AuthenticodeSignature -LiteralPath '" + path.replace("'", "''") + "' | Select-Object Status | ConvertTo-Json -Compress"], timeout=min(2, remaining))
+                                # The path travels as data in an environment variable, never inside the script text:
+                                # PowerShell also treats typographic quotes as quotes, so escaping cannot be trusted.
+                                code, signed = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SIGNATURE_SCRIPT],
+                                                    timeout=min(2, remaining), env={**os.environ, "SENTINEL_SIG_PATH": path})
                                 try:
                                     signature = {"status": json.loads(signed).get("Status"), "source": "Authenticode"} if code == 0 else {"status": "unavailable"}
                                 except (ValueError, AttributeError):
