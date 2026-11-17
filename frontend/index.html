@@ -50,7 +50,7 @@
         <button class="nav-item" data-tab="performance"><svg><use href="#i-gauge"/></svg>Performance</button>
         <button class="nav-item" data-tab="logs"><svg><use href="#i-list"/></svg>Event Logs</button>
         <p class="nav-group">AI</p>
-        <button class="nav-item" data-tab="technician"><svg><use href="#i-chat"/></svg>Ask Technician</button>
+        <button class="nav-item" data-tab="technician"><svg><use href="#i-chat"/></svg>AI Chat</button>
         <button class="nav-item" data-tab="learning"><svg><use href="#i-brain"/></svg>Learning <b id="learn-count"></b></button>
         <button class="nav-item" data-tab="decisions"><svg><use href="#i-list"/></svg>Decisions</button>
         <p class="nav-group">Fleet</p>
@@ -454,19 +454,19 @@
       <section id="technician" class="tab">
         <header class="page-heading">
           <div>
-            <p class="kicker">Assisted response · local AI</p>
-            <h1>Ask Technician</h1>
-            <p class="subheading">Describe what you are seeing and get grounded, step-by-step help.</p>
+            <p class="kicker">Ask Technician · local AI with checks</p>
+            <h1>AI Chat</h1>
+            <p class="subheading">Describe the problem in your own words. The AI can run read-only checks on the selected device, then explains what it found. A fix runs only after you approve its card.</p>
           </div>
           <label class="device-picker"><span>Device</span><select id="chat-device" class="field-input"></select></label>
         </header>
         <div class="chat-layout">
           <section class="chat-panel">
             <div id="chat-messages" class="chat-messages">
-              <div class="chat-message assistant">Ask an IT question or describe a problem with the selected device. All answers are in English.</div>
+              <div class="chat-message assistant">Ask an IT question or describe a problem with the selected device, e.g. "internet is slow, check it". I can run read-only checks; any fix waits for your approval. All answers are in English.</div>
             </div>
             <form id="chat-form" class="chat-form">
-              <input id="chat-input" maxlength="8000" autocomplete="off" placeholder="Why is my memory usage high?" aria-label="Ask the technician">
+              <input id="chat-input" maxlength="8000" autocomplete="off" placeholder="My PC is slow, check why" aria-label="Message the AI technician">
               <label class="think-toggle" title="The AI reasons step by step before answering: better answers, but several minutes on a laptop CPU"><input type="checkbox" id="chat-think"> Think deeper</label>
               <button type="submit">Send</button>
             </form>
@@ -682,7 +682,7 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261117"></script>
+  <script src="/static/app.js?v=20261117b"></script>
   <script src="/static/workbench.js?v=20261105"></script>
   <script src="/static/threat_intelligence.js?v=20261116"></script>
 </body>

@@ -21,7 +21,8 @@ python -u tests/e2e/api_check.py "<dashboard password>" <device_id> [checks]
 | `fast` | Checks + one AI report | 1-3 min |
 | `deep` | AI investigates with extra tools (deep thinking) | 5-10 min |
 | `fix` | Diagnose, approve a low-risk fix, re-check | 2-4 min |
-| `chat` | Ask Technician about the device | 1-2 min |
+| `chat` | The older one-shot chat endpoint (`/api/agent/chat`, snapshot only) | 1-2 min |
+| `aichat` | AI Chat: the AI picks read-only checks, runs them and answers; a fix card is shown but never approved | 2-5 min |
 | `report` | Health report + AI analysis | 2-5 min |
 | `logs` | AI analysis of the device's event logs | 1-2 min |
 | `local` | Instant diagnosis of the server itself | seconds |

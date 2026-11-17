@@ -251,6 +251,18 @@ Each uses the same selected AI model (`aiops-brain` on Ollama by default) with i
 - [~] Report badge in the session view, `specialist` in the decision record, `GET /api/troubleshoot/specialists`
 - Local validation: 383 unit tests passed (24 new in `tests/test_specialists.py`); offline Instant evaluation 10/10 on all seven checks. Not checked yet: the browser render of the badge, and real-model accuracy and timing on the server (`python -m backend.agent_brain.evaluate --mode fast`, then `--mode deep`)
 
+## Phase 13: AI Chat, a chatbot with tools (2026-11-17)
+
+Ask Technician becomes **AI Chat**: the user describes a problem in plain words, and the AI runs read-only checks and answers.
+
+- [~] `backend/chat_agent.py`: one chat turn runs in the background. The model picks read-only checks of the specialist's area (2 rounds normally, 4 with Think deeper, at most 3 checks per round and 6 per message), the device runs them, and the model writes the answer from the results. A greeting or general question needs no check. An offline device is answered from its last snapshot without checks
+- [~] Fix card: only when checks ran, only a fix tool relevant to the matched problem, with arguments the checks actually saw (`validate_fixes` + `known_items`). It is single use and expires after 10 minutes
+- [~] Approve: refused while another change runs on the device. The card is marked running before anything is sent, so a double click cannot run it twice. It is recorded (`fix_approved`, audit row, `fix_result`), and the checks that showed the problem run again (rules, no AI). Reject is recorded and runs nothing. The AST guard pins `chat_agent.apply_proposal` to the approve endpoint
+- [~] API: `POST /api/chat`, `GET /api/chat/turns/{id}`, `POST /api/chat/turns/{id}/approve|reject`. `/api/agent/chat` is kept for compatibility
+- [~] UI: the "AI Chat" tab shows live progress (the specialist, its phase, each check), the checks it ran, and the fix card with Approve & run / Reject
+- [~] E2E: `tests/e2e/api_check.py` step `aichat` (never approves the card)
+- Local validation: 393 unit tests passed (10 new in `tests/test_chat_agent.py`). The JavaScript was not syntax-checked by a tool on the laptop (no working Node), so the browser render is unchecked. Server (user): `api_check.py <password> <device> aichat`, open AI Chat and ask "internet is slow, check it", time the answer on the CPU server
+
 ## Alignment review (2026-11-04)
 
 - Reviewed the root task tracker, historical plans, reachable Git history, current backend paths, all 14 local decision JSON records, and local database/model metadata. The local database has no saved sessions, learned cases, tasks, or remediation audit rows; it does not establish the Ubuntu server's current state.

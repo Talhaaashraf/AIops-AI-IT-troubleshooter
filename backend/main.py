@@ -29,6 +29,7 @@ from .agent_brain.executor import LOCAL_DEVICE_ID, execute, resolve_target
 from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, live_phase, normalize_mode, record_late_fix_result, run_diagnosis
 from .agent_brain.playbooks import get_playbook, public_playbooks
 from .agent_brain import specialists
+from . import chat_agent
 from .learning import model_builder
 from .learning import store as learning_store
 from .llm import catalog as llm_catalog
@@ -1490,9 +1491,43 @@ def agent_chat(payload: dict):
         raise HTTPException(status_code=400, detail="Please keep the question under 8000 characters")
     if "conversation_history" in payload and not isinstance(payload["conversation_history"], list):
         raise HTTPException(status_code=400, detail="conversation_history must be a list")
+    device_id, report, context = _chat_device(payload)
+    # The browser owns its history. Legacy callers can instead reuse an opaque session id;
+    # never let unrelated tabs/users silently share a device's "default" conversation.
+    session_id = str(payload.get("session_id") or secrets.token_urlsafe(24))
+    if len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="session_id is too long")
+    session_key = ("technician", device_id, session_id)
+    client_history = "conversation_history" in payload
+    history = normalize_chat_history(payload["conversation_history"] if client_history else chat_sessions.get(session_key, []))
+    try:
+        think = bool(payload.get("think"))
+        intent = security_chat.intent(message)
+        if intent in ("unrelated", "greeting") or not is_ai_available():
+            reply = _chat_without_ai(intent)
+        else:
+            reply = chat(message, report, history, think=think, context=context)
+        if not client_history:
+            history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
+            chat_sessions[session_key] = normalize_chat_history(history)
+        _record_ai("chat_answer", device_id or LOCAL_DEVICE_ID, think, {"question": message[:500], "summary": reply.get("plain_explanation"),
+                   "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations"), "device_context": context})
+        return {"reply": reply, "session_id": session_id, "device_context": context, "intent": intent, "evidence_refs": [], "investigation": None}
+    except AIModelUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except AIUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
-    # Chat about a chosen device. "This server" is the host's agent once it is installed; until then, in
-    # Docker, it is only the container.
+
+def _chat_without_ai(intent):
+    answer = (security_chat.REDIRECT if intent == "unrelated" else "Hello. I can help with technical IT and security questions." if intent == "greeting"
+              else "The technical assistant is unavailable right now. Please try again when the model is available; no device action has been performed.")
+    return {"plain_explanation": answer, "technical_root_cause": "", "recommendations": []}
+
+
+def _chat_device(payload):
+    """(device_id, latest snapshot, device context) for a chat about the chosen device. "This server" is the host's
+    agent once it is installed; until then, in Docker, it is only the container."""
     device_id = str(payload.get("device_id") or "").strip()
     server = server_identity.server_device() if device_id in ("", LOCAL_DEVICE_ID, "local-server") else None
     if server:
@@ -1516,32 +1551,77 @@ def agent_chat(payload: dict):
         context = {"source": "container" if server_identity.in_docker() else "local",
                    "device_id": device_id, "received_at": datetime.now(timezone.utc).isoformat(),
                    "status": "online", "stale": False, "has_snapshot": bool(report)}
-    # The browser owns its history. Legacy callers can instead reuse an opaque session id;
-    # never let unrelated tabs/users silently share a device's "default" conversation.
-    session_id = str(payload.get("session_id") or secrets.token_urlsafe(24))
-    if len(session_id) > 128:
-        raise HTTPException(status_code=400, detail="session_id is too long")
-    session_key = ("technician", device_id, session_id)
-    client_history = "conversation_history" in payload
-    history = normalize_chat_history(payload["conversation_history"] if client_history else chat_sessions.get(session_key, []))
+    return device_id, report, context
+
+
+# ---- AI Chat: the chatbot that can run read-only checks (LLM + tools); fixes only after approval ----
+
+@app.post("/api/chat")
+async def chat_start(payload: dict):
+    """Start one chat turn. Read-only checks may run on the device; the reply arrives through GET /api/chat/turns/{id}."""
+    message = " ".join(str(payload.get("message") or "").split())
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    if len(message) > 8000:
+        raise HTTPException(status_code=400, detail="Please keep the message under 8000 characters")
+    history = payload.get("conversation_history", [])
+    if not isinstance(history, list):
+        raise HTTPException(status_code=400, detail="conversation_history must be a list")
+    device_id, report, context = await asyncio.to_thread(_chat_device, payload)
+    target = await asyncio.to_thread(resolve_target, device_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    turn = chat_agent.create_turn(message, target, report, context, history, payload.get("think"))
+    intent = security_chat.intent(message)
+    if intent in ("unrelated", "greeting") or not await asyncio.to_thread(is_ai_available):
+        chat_agent.finish(turn, _chat_without_ai(intent))
+    else:
+        _spawn(chat_agent.run_turn(turn))
+    return chat_agent.public(turn)
+
+
+@app.get("/api/chat/turns/{turn_id}")
+def chat_turn(turn_id: str):
+    turn = chat_agent.get_turn(turn_id)
+    if not turn:
+        raise HTTPException(status_code=404, detail="This chat answer is no longer available")
+    return chat_agent.public(turn)
+
+
+@app.post("/api/chat/turns/{turn_id}/approve")
+async def chat_approve(turn_id: str, payload: dict):
+    """A person approved the fix on a chat card: it runs once, is recorded, and is checked again."""
+    turn = chat_agent.get_turn(turn_id)
+    if not turn:
+        raise HTTPException(status_code=404, detail="This chat answer is no longer available")
+    _refuse_if_changing(turn["device_id"])
     try:
-        think = bool(payload.get("think"))
-        intent = security_chat.intent(message)
-        if intent in ("unrelated", "greeting") or not is_ai_available():
-            answer = security_chat.REDIRECT if intent == "unrelated" else "Hello. I can help with technical IT and security questions." if intent == "greeting" else "The technical assistant is unavailable right now. Please try again when the model is available; no device action has been performed."
-            reply = {"plain_explanation": answer, "technical_root_cause": "", "recommendations": []}
-        else:
-            reply = chat(message, report, history, think=think, context=context)
-        if not client_history:
-            history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
-            chat_sessions[session_key] = normalize_chat_history(history)
-        _record_ai("chat_answer", device_id or LOCAL_DEVICE_ID, think, {"question": message[:500], "summary": reply.get("plain_explanation"),
-                   "root_cause": reply.get("technical_root_cause"), "steps": reply.get("recommendations"), "device_context": context})
-        return {"reply": reply, "session_id": session_id, "device_context": context, "intent": intent, "evidence_refs": [], "investigation": None}
-    except AIModelUnavailableError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    except AIUnavailableError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+        turn, proposal = chat_agent.claim(turn_id, payload.get("proposal_id"))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    fixes_starting.add(turn["device_id"])  # only now: a refused request must not lock the device
+    _spawn(_apply_chat_fix(turn, proposal))
+    return chat_agent.public(turn)
+
+
+async def _apply_chat_fix(turn, proposal):
+    try:
+        await chat_agent.apply_proposal(turn, proposal, approved_by="operator")
+    finally:
+        fixes_starting.discard(turn["device_id"])
+
+
+@app.post("/api/chat/turns/{turn_id}/reject")
+def chat_reject(turn_id: str, payload: dict):
+    try:
+        chat_agent.reject(turn_id, payload.get("proposal_id"))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return chat_agent.public(chat_agent.get_turn(turn_id))
 
 
 @app.get("/api/ai/status")

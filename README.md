@@ -20,7 +20,7 @@ AIops monitors Windows, Linux and macOS computers and troubleshoots their softwa
 | **Software** | Every installed program with its version, size and available update. **Update** uses winget, apt or dnf. **Uninstall** runs the program's own silent uninstaller. **Remove completely** also finds the folders, shortcuts and registry keys it left behind and moves the ones you tick to a quarantine you can restore for 7 days. |
 | **Agents** | Enrolled devices with an **AI health report**: a 0-100 score, every detected issue and full system details. Each new device gets an automatic onboarding check-up. |
 | **Dashboard, Alerts, Security, Event Logs** | Live monitoring, alert rules, the security posture (firewall, antivirus, encryption, updates, open ports) and grouped event-log errors. These work without any AI. |
-| **Ask Technician** | Chat about a device's current state. |
+| **AI Chat** (was Ask Technician) | Chat with the local AI in your own words, e.g. "internet is slow, check it". The specialist for the problem picks read-only checks, the device runs them, and the AI answers from the results. That is 2 rounds of checks normally and 4 with **Think deeper**, at most 6 checks per message. If a fix tool would solve what it found, the answer carries a card: nothing runs until you click **Approve & run**. The approved change is recorded and checked again. General questions are answered without any check. |
 | **Learning** | Past tickets and the lessons the AI learned from them. |
 | **Live Troubleshooting** | Running and queued diagnoses, approved fixes, and re-checks across devices. Two diagnoses can run at once by default. |
 | **Threat Detection** | Read-only threat scans with evidence and separately approved response actions (rescan, quarantine, end process, delete). Its **Threat Intelligence** panel looks up file hashes on VirusTotal and Hybrid Analysis with your own keys. Sending a file to a provider needs a separate approval naming the provider and the file. |
@@ -251,7 +251,8 @@ All routes need the dashboard login, except the agent and enrollment routes.
 - **AI:**
   - `GET /api/ai/status`, `GET /api/ai/models`
   - `POST /api/ai/models/select|pull`
-  - `GET|POST /api/agent/chat`
+  - `POST /api/chat` `{message, device_id, think?, conversation_history?}` starts an AI Chat turn; `GET /api/chat/turns/{id}` shows its progress and answer; `POST /api/chat/turns/{id}/approve|reject` `{proposal_id}` decides its fix card
+  - `GET|POST /api/agent/chat` (older one-shot chat from the snapshot, kept for compatibility)
   - `GET /api/decisions`
   - `GET /api/learning/stats|cases|lessons`, `POST /api/learning/rebuild`
 - **Threats and Threat Intelligence:**

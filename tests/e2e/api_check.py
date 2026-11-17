@@ -129,6 +129,22 @@ if wanted("chat"):
     log(f"  {response.status_code} in {time.time() - started:.0f}s: {json.dumps(body)[:500]}")
     check("chat answers about the laptop", response.status_code == 200 and bool((body.get("reply") or {}).get("plain_explanation")) and "WSL2" not in json.dumps(body))
 
+if wanted("aichat"):
+    log("\n=== AI Chat (LLM + read-only checks; a fix card is never approved here)")
+    started = time.time()
+    turn = s.post(f"{BASE}/api/chat", json={"message": "Internet feels slow, please check it", "device_id": DEVICE}).json()
+    while turn.get("state") == "running" and time.time() - started < 900:
+        time.sleep(3)
+        turn = s.get(f"{BASE}/api/chat/turns/{turn['turn_id']}").json()
+    log(f"  {turn.get('state')} in {time.time() - started:.0f}s by {(turn.get('specialist') or {}).get('name')}: "
+        f"checks={[step['tool_id'] for step in turn.get('steps') or []]} fix={(turn.get('proposal') or {}).get('tool_id')}")
+    check("AI Chat answers", turn.get("state") == "done" and bool((turn.get("reply") or {}).get("plain_explanation")), turn.get("error") or "")
+    check("AI Chat is handled by the Network specialist", (turn.get("specialist") or {}).get("id") == "network")
+    check("AI Chat ran only read-only checks", all(step["tool_id"] in ("check_internet", "ping_host", "dns_lookup", "test_tcp_port", "wifi_status",
+                                                                        "driver_inventory", "security_posture", "system_overview", "event_log_errors",
+                                                                        "service_status") for step in turn.get("steps") or []))
+    check("a proposed fix waits for approval", (turn.get("proposal") or {}).get("state") in (None, "proposed"))
+
 if wanted("report"):
     log("\n=== AI health report")
     report = s.get(f"{BASE}/api/agents/{DEVICE}/health-report").json()

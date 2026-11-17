@@ -67,6 +67,18 @@ def test_no_code_path_applies_a_fix_without_a_person():
         return found
 
     assert callers_of("apply_fix") == {"main.py:_apply_approved_fix"}
+    # The chat's approval card: chat_agent.apply_proposal only from the approve endpoint (through its wrapper).
+    def attribute_callers(name):
+        found = set()
+        for path, text in sources.items():
+            for function in ast.walk(ast.parse(text)):
+                if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                        isinstance(call, ast.Call) and getattr(call.func, "attr", None) == name for call in ast.walk(function)):
+                    found.add(f"{path.name}:{function.name}")
+        return found
+
+    assert attribute_callers("apply_proposal") == {"main.py:_apply_chat_fix"}
+    assert callers_of("_apply_chat_fix") == {"main.py:chat_approve"}
     assert callers_of("_apply_approved_fix") == {"main.py:troubleshoot_apply_fix"}
     assert not any("AUTO_FIX_MAX_RISK" in text or "_auto_fix" in text for text in sources.values())
 
@@ -296,7 +308,7 @@ def test_only_person_triggered_code_can_change_a_device():
     assert risky_callers == plumbing | {"planner.py:apply_fix", "main.py:uninstall_device_software", "main.py:update_device_software",
                                         "main.py:quarantine_device_leftovers", "main.py:restore_device_quarantine", "main.py:install_device_os_updates",
                                         "main.py:threat_action", "main.py:remove_device_microsoft", "main.py:fix_device_installer",
-                                        "security_api.py:prepare_sample"}
+                                        "security_api.py:prepare_sample", "chat_agent.py:apply_proposal"}
 
 
 def test_a_failed_fix_is_recorded(tmp_path, monkeypatch):

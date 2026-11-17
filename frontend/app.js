@@ -1184,7 +1184,7 @@ function resetTechnicianChat(deviceId) {
   chatDeviceId = deviceId;
   chatHistory = [];
   $('chat-messages').replaceChildren();
-  addChatMessage('Ask an IT question or describe a problem with the selected device. All answers are in English.', 'assistant');
+  addChatMessage('Ask an IT question or describe a problem with the selected device, e.g. "internet is slow, check it". I can run read-only checks; any fix waits for your approval. All answers are in English.', 'assistant');
 }
 
 async function loadChatDevice() {
@@ -1200,6 +1200,121 @@ async function loadChatDevice() {
   } catch (_error) {
     if (chatDeviceId === deviceId) renderChatContext(null);
   }
+}
+
+async function chatRequest(url, body) {
+  const response = await fetch(url, body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `Chat request failed (${response.status})`);
+  return data;
+}
+
+function chatStepsList(steps) {
+  const list = document.createElement('ul');
+  list.className = 'chat-steps';
+  (steps || []).forEach((step) => {
+    const item = document.createElement('li');
+    item.className = `chat-step ${step.state}`;
+    const label = step.state === 'running' ? 'running' : step.state === 'done' ? 'done' : 'failed';
+    item.textContent = `${step.tool_id.replaceAll('_', ' ')}: ${label}${step.summary ? ` - ${step.summary}` : ''}`;
+    list.appendChild(item);
+  });
+  return list;
+}
+
+function renderChatProgress(element, turn) {
+  element.replaceChildren();
+  const head = document.createElement('strong');
+  head.textContent = `${turn.specialist?.name || 'Technician'}: ${turn.phase || 'working'}...`;
+  element.appendChild(head);
+  if ((turn.steps || []).length) element.appendChild(chatStepsList(turn.steps));
+  $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+}
+
+function renderChatTurnExtras(element, turn) {
+  const meta = document.createElement('p');
+  meta.className = 'soft-label';
+  meta.textContent = `${turn.specialist?.name || 'Technician'} · ${turn.steps?.length ? `${turn.steps.length} check(s) run now` : turn.can_check ? 'no check needed' : 'device offline: answered from its last snapshot'}`;
+  element.prepend(meta);
+  if ((turn.steps || []).length) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Checks the AI ran (read-only)';
+    details.append(summary, chatStepsList(turn.steps));
+    element.appendChild(details);
+  }
+  if (turn.proposal) element.appendChild(chatProposalCard(turn));
+}
+
+function chatProposalCard(turn) {
+  const card = document.createElement('div');
+  card.className = 'ts-fix chat-fix';
+  const draw = (proposal) => {
+    card.replaceChildren();
+    const head = document.createElement('div');
+    head.className = 'ts-fix-head';
+    const title = document.createElement('strong');
+    title.textContent = proposal.title;
+    const risk = document.createElement('span');
+    risk.className = `severity severity-${proposal.risk === 'high' ? 'high' : proposal.risk === 'medium' ? 'medium' : 'low'}`;
+    risk.textContent = `${proposal.risk} risk`;
+    head.append(title, risk);
+    const why = document.createElement('p');
+    why.textContent = proposal.why || '';
+    card.append(head, why);
+    if (proposal.state === 'proposed') {
+      const note = document.createElement('small');
+      note.className = 'soft-label';
+      note.textContent = 'Nothing runs until you approve. Approving runs this one change on the device and checks it again.';
+      const row = document.createElement('div');
+      row.className = 'button-row';
+      const approve = document.createElement('button');
+      approve.type = 'button';
+      approve.className = 'primary-button';
+      approve.textContent = 'Approve & run';
+      const reject = document.createElement('button');
+      reject.type = 'button';
+      reject.className = 'ghost-button';
+      reject.textContent = 'Reject';
+      approve.onclick = async () => {
+        if (!confirm(`Run "${proposal.title}" on this device?`)) return;
+        approve.disabled = reject.disabled = true;
+        try {
+          let view = await chatRequest(`/api/chat/turns/${encodeURIComponent(turn.turn_id)}/approve`, { proposal_id: proposal.id });
+          draw(view.proposal);
+          while (view.proposal?.state === 'running') {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            view = await chatRequest(`/api/chat/turns/${encodeURIComponent(turn.turn_id)}`);
+          }
+          draw(view.proposal);
+        } catch (error) {
+          toast(friendlyError(error), 'error');
+          approve.disabled = reject.disabled = false;
+        }
+      };
+      reject.onclick = async () => {
+        approve.disabled = reject.disabled = true;
+        try {
+          draw((await chatRequest(`/api/chat/turns/${encodeURIComponent(turn.turn_id)}/reject`, { proposal_id: proposal.id })).proposal);
+        } catch (error) {
+          toast(friendlyError(error), 'error');
+          approve.disabled = reject.disabled = false;
+        }
+      };
+      row.append(approve, reject);
+      card.append(note, row);
+    } else {
+      const status = document.createElement('p');
+      status.className = 'soft-label';
+      const labels = { running: 'Running on the device...', applied: 'Applied.', failed: 'Failed.', rejected: 'Rejected: nothing was run.', expired: 'Expired: ask again for a fresh card.' };
+      status.textContent = `${labels[proposal.state] || proposal.state} ${proposal.result?.summary || ''} ${proposal.verify?.explanation || ''}`.trim();
+      card.appendChild(status);
+    }
+  };
+  draw(turn.proposal);
+  return card;
 }
 
 async function sendChat(event) {
@@ -1219,16 +1334,19 @@ async function sendChat(event) {
   pending.setAttribute('role', 'status');
 
   try {
-    const response = await fetch('/api/agent/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, device_id: deviceId, think: Boolean($('chat-think')?.checked), conversation_history: chatHistory }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || `Chat request failed (${response.status})`);
+    // AI Chat: the server runs read-only checks the AI picks, then answers. Progress is polled; a fix comes as a card.
+    let turn = await chatRequest('/api/chat', { message, device_id: deviceId, think: Boolean($('chat-think')?.checked), conversation_history: chatHistory });
+    while (turn.state === 'running') {
+      renderChatProgress(pending, turn);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      if (deviceId !== ($('chat-device').value || 'local')) return;
+      turn = await chatRequest(`/api/chat/turns/${encodeURIComponent(turn.turn_id)}`);
+    }
     if (deviceId !== ($('chat-device').value || 'local')) return;
-    addChatMessage(data.reply, 'assistant');
-    chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: data.reply });
+    if (turn.state === 'failed') throw new Error(turn.error || 'The chat failed. Nothing was changed on the device.');
+    const answer = addChatMessage(turn.reply, 'assistant');
+    renderChatTurnExtras(answer, turn);
+    chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: turn.reply });
     chatHistory = chatHistory.slice(-6);
   } catch (error) {
     console.error('Chat request failed:', error);

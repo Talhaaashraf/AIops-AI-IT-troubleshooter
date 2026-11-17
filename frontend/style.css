@@ -280,6 +280,11 @@ td:first-child { color: var(--muted); font-size: .8rem; white-space: nowrap; }
 .chat-message.assistant { background: var(--surface-2); border-bottom-left-radius: 4px; }
 .chat-message.assistant.diagnosis { margin-bottom: 0; }
 .chat-message.user { justify-self: end; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-bottom-right-radius: 4px; }
+.chat-steps { margin: 8px 0 0; padding-left: 18px; font-size: .82rem; color: var(--muted); }
+.chat-step.running { color: var(--accent); }
+.chat-step.failed { color: var(--bad); }
+.chat-message details { margin-top: 8px; font-size: .82rem; }
+.chat-fix { margin-top: 10px; }
 .chat-form { display: flex; gap: 8px; margin-top: 14px; }
 .chat-form input { min-width: 0; flex: 1; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-2); outline: none; }
 .chat-form input:focus { border-color: var(--accent); }
