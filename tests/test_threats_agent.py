@@ -195,28 +195,22 @@ def test_linux_auth_lines_become_sign_in_findings(monkeypatch):
     assert items["user_created"]["fields"]["New account"] == "mallory"
 
 
-def test_scan_hashing_is_lock_free_and_bounded(tmp_path, monkeypatch):
+def test_scan_hashes_come_from_the_antivirus_and_flagged_files_are_never_opened(tmp_path, monkeypatch):
     from agent.toolkit import security_monitor
-    monkeypatch.setattr(security_monitor, "os_name", lambda: "Linux")
-    files = []
-    for index in range(security_monitor.HASH_LIMIT + 5):
-        path = tmp_path / f"sample{index}.exe"
-        path.write_bytes(b"inert %d" % index)
-        files.append({"id": f"d{index}", "kind": "malware", "on_disk": True, "path": str(path)})
-    process_candidates = {"proc": "/kept"}
-    monkeypatch.setattr(security_monitor, "_candidates", process_candidates)
-    held = security_monitor._lock.acquire()  # a concurrent process snapshot holding the lock must not block hashing
-    try:
-        import threading
-        result = {}
-        worker = threading.Thread(target=lambda: result.update(security_monitor.scan_hashes("scan1", files)))
-        worker.start(); worker.join(5)
-        assert not worker.is_alive()
-    finally:
-        security_monitor._lock.release()
-    assert held and len(result["files"]) == security_monitor.HASH_LIMIT and result["files"][0]["item_id"] == "d0"
+    monkeypatch.setattr(security_monitor, "_hash_paths", lambda *a, **kw: pytest.fail("a flagged file must not be opened"))
+    monkeypatch.setattr(security_monitor.os, "open", lambda *a, **kw: pytest.fail("a flagged file must not be opened"))
+    items = [{"id": f"d{index}", "kind": "malware", "on_disk": True, "path": str(tmp_path / f"s{index}.exe"),
+              "fields": {"SHA256": f"{index:064X}"}} for index in range(security_monitor.HASH_LIMIT + 5)]
+    items += [{"id": "dup", "kind": "malware", "path": "x", "fields": {"SHA256": f"{0:064x}"}},     # same file twice
+              {"id": "nohash", "kind": "malware", "path": "y", "fields": {}},                         # e.g. a Defender event
+              {"id": "bad", "kind": "malware", "path": "z", "fields": {"SHA256": "not-a-hash"}},
+              {"id": "other", "kind": "failed_logon", "fields": {"SHA256": "a" * 64}}]
+    result = security_monitor.scan_hashes("scan1", items)
+    assert len(result["files"]) == security_monitor.HASH_LIMIT
+    first = result["files"][0]
+    assert first["sha256"] == f"{0:064x}" and first["item_id"] == "d0" and first["scan_id"] == "scan1" and first["source"] == "antivirus-reported"
+    assert any("2 malware finding(s) have no antivirus-reported SHA-256" in gap for gap in result["gaps"])
     assert any("5 further" in gap for gap in result["gaps"])
-    assert security_monitor._candidates is process_candidates and process_candidates == {"proc": "/kept"}
 
 
 def test_fit_includes_intelligence_hashes_and_trims_them_before_findings():

@@ -16,7 +16,17 @@ jobs:
 
       - name: Copy env file
         run: |
-          cp /home/aiops/app-config/.env .env
+          # Provider API keys (VirusTotal, Hybrid Analysis) are stored encrypted with this master key. It is made
+          # once, kept in the persistent config (not the checkout) and never replaced: a new key would make the
+          # stored provider keys unreadable. Without it, keys live only in memory and vanish on every deploy.
+          CONFIG=/home/aiops/app-config/.env
+          if ! grep -q '^SENTINEL_INTELLIGENCE_MASTER_KEY=.' "$CONFIG"; then
+            sed -i '/^SENTINEL_INTELLIGENCE_MASTER_KEY=/d' "$CONFIG"
+            [ -z "$(tail -c1 "$CONFIG")" ] || echo >> "$CONFIG"
+            echo "SENTINEL_INTELLIGENCE_MASTER_KEY=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_')" >> "$CONFIG"
+            echo "Created SENTINEL_INTELLIGENCE_MASTER_KEY in $CONFIG (value not shown)"
+          fi
+          cp "$CONFIG" .env
           # The host's name lets AIops show the agent installed on this server as "This server" instead of
           # its own container (backend/server_identity.py). A value already in the .env wins; an empty one is replaced.
           if ! grep -q '^AIOPS_SERVER_HOSTNAME=.' .env; then

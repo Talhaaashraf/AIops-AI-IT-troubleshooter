@@ -28,18 +28,32 @@ CHANNELS = ("Security", "System", "Microsoft-Windows-PowerShell/Operational", "M
 
 
 def scan_hashes(scan_id, items):
-    """Hash only executable scan findings, with the same bounded path checks as process hashes.
+    """External-lookup hashes for malware findings, taken from the antivirus's own detection record.
 
-    Works on its own candidate list, so it never holds or swaps the shared process-candidate state."""
-    permitted = []
+    A file the antivirus has flagged is never opened here: reading it can raise a fresh detection (or a
+    quarantine) each time, so every scan would feed the next one. Findings without an antivirus-reported
+    hash are counted in `gaps` instead of being read."""
+    rows, seen, missing = [], set(), 0
     for item in items[:100]:
-        path = item.get("path") or ""
-        if item.get("kind") == "malware" and item.get("on_disk") and Path(path).suffix.lower() in (".exe", ".dll", ".sys", ".com", ".scr", ".msi", ".bin", ".dylib", ".so") and _safe_path(path):
-            permitted.append((f"scan:{scan_id}:{item['id']}", path))
-    result = _hash_paths(permitted)
-    for row in result["files"]:
-        _, row["scan_id"], row["item_id"] = row.pop("process_id").split(":")
-    return result
+        if item.get("kind") != "malware":
+            continue
+        sha = str((item.get("fields") or {}).get("SHA256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            missing += 1
+            continue
+        if sha in seen:
+            continue
+        seen.add(sha)
+        rows.append({"sha256": sha, "path": item.get("path"), "size": item.get("size"), "scan_id": scan_id, "item_id": item.get("id"),
+                     "signature": {"status": "not collected (flagged file is not opened)"}, "source": "antivirus-reported"})
+    eligible = len(rows)
+    rows = rows[:HASH_LIMIT]
+    gaps = ["Hashes come from the antivirus detection record; flagged files are never opened by this agent"]
+    if missing:
+        gaps.append(f"{missing} malware finding(s) have no antivirus-reported SHA-256, so no external lookup was queued for them")
+    if eligible > HASH_LIMIT:
+        gaps.append(f"{eligible - HASH_LIMIT} further hashes were not sent (limit {HASH_LIMIT} per scan)")
+    return {"files": rows, "candidates": eligible + missing, "deferred": eligible - len(rows) + missing, "gaps": gaps}
 
 
 def _run(args, timeout=20, env=None):
