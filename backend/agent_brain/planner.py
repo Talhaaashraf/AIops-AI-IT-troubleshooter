@@ -43,7 +43,7 @@ from ..llm.base import loads_lenient
 from ..llm.brain import BRAIN_PRINCIPLES, MAX_SOLUTIONS, MIN_SOLUTIONS
 from ..server_identity import is_container_target, server_device
 from ..workers import ai_gate, diagnosis_limit, diagnosis_slots, run_ai
-from . import events, findings, knowledge, session_store
+from . import events, findings, knowledge, session_store, specialists
 from .executor import execute, resolve_target
 from .playbooks import RELEVANT_FIXES, baseline_phases, filter_relevant_fixes, get_playbook, is_complaint, match_playbook, playbook_tips
 
@@ -916,6 +916,8 @@ async def _diagnose(session, target, mode, preset_evidence=None):
         warm_up = asyncio.create_task(run_ai(_warm_up))
 
     playbook = get_playbook(session.get("playbook_id")) or match_playbook(issue)
+    specialist = specialists.route(playbook)
+    _think(session_id, f"Handled by the {specialist['name']} (same AI brain, its own instructions and checks).")
     if preset_evidence:
         _publish_status(session_id, "running", f"Analysing the {len(preset_evidence)} checks that just ran on {target.label}")
         _think(session_id, f"Starting from the {len(preset_evidence)} checks that just ran on {target.label} ({mode} mode).")
@@ -933,7 +935,7 @@ async def _diagnose(session, target, mode, preset_evidence=None):
     if mode == "instant":
         report, similar = _rule_based_report(found, issue, target.os_type, note, playbook), []
     else:
-        report, similar, found = await _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up)
+        report, similar, found = await _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up, specialist)
     report = ground_root_cause(report, playbook, found, evidence)
     report = add_learned_fixes(report, learned_fixes, target.os_type)
     report = add_rule_fixes(report, found, target.os_type)
@@ -942,6 +944,7 @@ async def _diagnose(session, target, mode, preset_evidence=None):
     report["quick_findings"] = found
     report["mode"] = mode
     report["playbook_id"] = (playbook or {}).get("id")
+    report["specialist"] = specialists.label(specialist)
     link_solutions(complete_solutions(report, playbook, found, target.os_type, evidence))
     enrich_report(report, found, playbook, evidence, issue)
     # Fleet correlation: is the same kind of problem hitting several devices? Read-only, best-effort.
@@ -975,7 +978,8 @@ def _recent_alert_lines(alerts, limit=3):
     return lines[:limit]
 
 
-async def _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up):
+async def _ai_report(session_id, target, issue, playbook, evidence, found, mode, warm_up, specialist=None):
+    specialist = specialist or specialists.route(playbook)
     alerts = get_alerts(10, "local-server" if target.is_local else target.device_id)
     alert_lines = "\n".join(f"- [{alert['severity']}] {alert['category']}: {alert['description']}" for alert in alerts) or "- none"
     similar = await asyncio.to_thread(learning_store.find_similar, issue, target.os_type, 3, playbook_id=(playbook or {}).get("id"))
@@ -993,7 +997,7 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
     if rounds:
         checked = len(evidence)
         try:
-            notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook)
+            notes = await _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook, specialist)
         except LLMUnavailableError as error:
             # Another call would most likely fail the same way, so answer from the rules.
             logger.warning("Troubleshoot %s: investigation failed, using rules: %s", session_id, error)
@@ -1014,7 +1018,7 @@ async def _ai_report(session_id, target, issue, playbook, evidence, found, mode,
     codes_block = knowledge.retrieve_codes(issue, evidence)
     report_messages = [
         {"role": "system", "content": REPORT_PROMPT},
-        {"role": "user", "content": f"Computer: {target.os_type}\nUser's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nEvidence:\n{evidence_text}"
+        {"role": "user", "content": specialists.instructions(specialist) + f"Computer: {target.os_type}\nUser's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nEvidence:\n{evidence_text}"
                                     + (f"\n\nDomain knowledge (how a senior engineer investigates this):\n{knowledge_block}" if knowledge_block else "")
                                     + (f"\n\nKnown codes seen (how to read them, not automatic causes):\n{codes_block}" if codes_block else "")
                                     + ("\n\nRecent monitoring alerts:\n" + "\n".join(recent) if recent else "")
@@ -1295,7 +1299,7 @@ def _record_diagnosis(session, target, report, found):
     kind = "performance_analysis" if session.get("playbook_id") == "performance" else "diagnosis"
     decision_log.record(kind, session["session_id"], {
         "device": target.label, "device_id": target.device_id, "os_type": target.os_type, "issue": session["issue"],
-        "mode": report.get("mode"), "playbook_id": report.get("playbook_id"), "provider": ai.get("provider"), "model": ai.get("model"),
+        "mode": report.get("mode"), "playbook_id": report.get("playbook_id"), "specialist": (report.get("specialist") or {}).get("id"), "provider": ai.get("provider"), "model": ai.get("model"),
         "thinking": ai.get("thinking", False), "prompt_hash": ai.get("prompt_hash"),
         "ai": {key: ai.get(key) for key in ("thinking_requested", "thinking_chars", "handoff", "schema", "truncated", "fallback", "fallback_reason", "usage", "handoff_usage") if key in ai},
         "root_cause": report.get("root_cause"), "root_cause_source": report.get("root_cause_source") or ("ai" if ai.get("model") and not ai.get("fallback") else "rules"),
@@ -1322,16 +1326,21 @@ def evidence_facts(found, evidence, limit=8):
     return facts[:limit]
 
 
-async def _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook=None):
-    """Let the LLM call more read-only tools (in parallel); returns its closing notes."""
+async def _investigate(session_id, target, issue, evidence, found_block, alert_lines, past_cases, rounds, playbook=None, specialist=None):
+    """Let the LLM call more read-only tools (in parallel); returns its closing notes. A specialist may only call
+    the read-only checks of its own area."""
+    specialist = specialist or specialists.route(playbook)
     tool_hint = knowledge.investigate_tool_hint(issue, playbook, {item[0] for item in evidence}, target.os_type)
     messages = [
         {"role": "system", "content": INVESTIGATE_PROMPT.format(os_type=target.os_type)},
-        {"role": "user", "content": f"User's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nBaseline evidence:\n{_evidence_block(evidence, TOOL_RESULT_CHARS)}\n\nRecent monitoring alerts:\n{alert_lines}{past_cases}"
+        {"role": "user", "content": specialists.instructions(specialist) + f"User's problem: {issue}\n\nAutomatic findings:\n{found_block}\n\nBaseline evidence:\n{_evidence_block(evidence, TOOL_RESULT_CHARS)}\n\nRecent monitoring alerts:\n{alert_lines}{past_cases}"
                                     + (f"\n\nWhich check answers which question (pick the one that tests your current hypothesis):\n{tool_hint}" if tool_hint else "")},
     ]
     schemas = tool_schemas(target.os_type, max_risk="read")
-    allowed = {schema["function"]["name"] for schema in schemas}
+    own = specialists.investigation_tools(specialist)
+    if own is not None:
+        schemas = [schema for schema in schemas if schema["function"]["name"] in own]
+    allowed ={schema["function"]["name"] for schema in schemas}
     executed = {(tool_id, json.dumps(args, sort_keys=True)) for tool_id, args, _ in evidence}
     _publish_status(session_id, "running", "AI is investigating")
     for _ in range(rounds):
@@ -1493,7 +1502,7 @@ async def _verify(session, target, report, fix):
         try:
             reply = await _chat([
                 {"role": "system", "content": VERIFY_PROMPT.format(os_type=target.os_type)},
-                {"role": "user", "content": f"Problem: {session['issue']}\nOriginal root cause: {report['root_cause']}\nFix applied: {fix['tool_id']} -> {fix['result'].get('summary')}\n\nFresh evidence:\n{_evidence_block(evidence, REPORT_EVIDENCE_CHARS)}"},
+                {"role": "user", "content": specialists.instructions(specialists.get((report.get("specialist") or {}).get("id"))) + f"Problem: {session['issue']}\nOriginal root cause: {report['root_cause']}\nFix applied: {fix['tool_id']} -> {fix['result'].get('summary')}\n\nFresh evidence:\n{_evidence_block(evidence, REPORT_EVIDENCE_CHARS)}"},
             ], json_mode=True, max_tokens=VERIFY_MAX_TOKENS, think=False)
             raw = _parse_json(reply["content"])
             resolved = raw.get("resolved") if type(raw.get("resolved")) is bool else None

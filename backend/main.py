@@ -28,6 +28,7 @@ from .agent_brain import session_store
 from .agent_brain.executor import LOCAL_DEVICE_ID, execute, resolve_target
 from .agent_brain.planner import apply_fix, decide_solution, default_mode, diagnosis_thinking, live_phase, normalize_mode, record_late_fix_result, run_diagnosis
 from .agent_brain.playbooks import get_playbook, public_playbooks
+from .agent_brain import specialists
 from .learning import model_builder
 from .learning import store as learning_store
 from .llm import catalog as llm_catalog
@@ -1621,6 +1622,13 @@ def _spawn(coroutine):
 @app.get("/api/troubleshoot/playbooks")
 def troubleshoot_playbooks():
     return {"playbooks": public_playbooks()}
+
+
+@app.get("/api/troubleshoot/specialists")
+def troubleshoot_specialists():
+    """The specialist agents (Hardware, OS, Network, General) and the playbooks each one handles. All of them use
+    the same AI brain; a specialist only adds its own instructions and read-only checks."""
+    return {"specialists": specialists.public_specialists()}
 
 
 @app.get("/api/troubleshoot/targets")

@@ -289,12 +289,14 @@ def test_only_person_triggered_code_can_change_a_device():
                 if risk != "read":
                     risky_callers.add(f"{path.name}:{function.name}")
     # Plumbing that passes a caller's risk through: execute (runs the tool), _run_step (session step around
-    # execute) and _run_software_job (job around execute). Everything else here is an endpoint a person clicks.
-    plumbing = {"executor.py:execute", "planner.py:_run_step", "main.py:_run_software_job"}
+    # execute), _run_software_job (job around execute) and _run_performance_check (a Performance job's risk, medium
+    # only for a stress test the person approved). Everything else here is an endpoint a person clicks.
+    plumbing = {"executor.py:execute", "planner.py:_run_step", "main.py:_run_software_job", "main.py:_run_performance_check"}
     # Adding a device-changing path must be a deliberate change to this list.
     assert risky_callers == plumbing | {"planner.py:apply_fix", "main.py:uninstall_device_software", "main.py:update_device_software",
                                         "main.py:quarantine_device_leftovers", "main.py:restore_device_quarantine", "main.py:install_device_os_updates",
-                                        "main.py:threat_action", "main.py:remove_device_microsoft", "main.py:fix_device_installer"}
+                                        "main.py:threat_action", "main.py:remove_device_microsoft", "main.py:fix_device_installer",
+                                        "security_api.py:prepare_sample"}
 
 
 def test_a_failed_fix_is_recorded(tmp_path, monkeypatch):

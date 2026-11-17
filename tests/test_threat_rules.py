@@ -119,7 +119,9 @@ def test_the_chat_understands_english_and_roman_urdu_and_only_proposes_offered_a
     assert threat_rules.parse_request("T1 ko quarantine karo", analysis) == ("T1", "quarantine")
     assert threat_rules.parse_request("please rescan it", analysis) == ("T1", "rescan")  # the only finding with actions
     assert threat_rules.parse_request("T2 delete kar do", analysis) == ("T2", "delete")
-    assert threat_rules.parse_request("is this file dangerous?", analysis) == ("T1", None)
+    # A question is never read as an instruction: no finding or action is inferred from it.
+    assert threat_rules.parse_request("is this file dangerous?", analysis) == (None, None)
+    assert threat_rules.parse_request("should i delete T1?", analysis) == (None, None)
     card = threat_rules.proposal(analysis, "t1", "delete")
     assert card["finding_id"] == "T1" and card["confirm"] == "kali-linux-installer-amd64.iso" and card["risk"] == "high"
     assert threat_rules.proposal(analysis, "T2", "delete") is None  # a sign-in has no file to delete

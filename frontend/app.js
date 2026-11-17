@@ -2713,7 +2713,7 @@ function renderTroubleshootSession(session) {
     ${session.status === 'failed' && session.error ? `<p class="ts-error">${escapeHtml(session.error)}</p>` : ''}
     ${timing}
     <div class="ts-root">
-      <div class="ts-badges"><span class="severity severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)}</span><span class="soft-label">confidence: ${escapeHtml(report.confidence)}</span>${report.affected_component ? `<span class="soft-label">affected: ${escapeHtml(report.affected_component)}</span>` : ''}</div>
+      <div class="ts-badges"><span class="severity severity-${escapeHtml(report.severity)}">${escapeHtml(report.severity)}</span><span class="soft-label">confidence: ${escapeHtml(report.confidence)}</span>${report.specialist ? `<span class="soft-label" title="Same AI brain with this specialist's instructions and checks">${escapeHtml(report.specialist.name)}</span>` : ''}${report.affected_component ? `<span class="soft-label">affected: ${escapeHtml(report.affected_component)}</span>` : ''}</div>
       <small>ROOT CAUSE</small>
       <strong>${escapeHtml(report.root_cause)}</strong>
       ${report.remaining_uncertainty ? `<p class="ts-uncertainty soft-label">Remaining uncertainty: ${escapeHtml(report.remaining_uncertainty)}</p>` : ''}

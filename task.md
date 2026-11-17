@@ -16,6 +16,9 @@ Historical deployment: phases 0-6 ran in Docker. Later phases below supersede th
 - [x] End-to-end checks committed: `tests/e2e/api_check.py`, `tests/e2e/browser_check.py`, `tests/e2e/README.md`
 - [~] QA team (read-only): `qa-functional`, `qa-performance`, `qa-security`, `qa-e2e` in `.claude/agents/`, run together with `/qa` (`.claude/skills/qa/SKILL.md`)
 - [~] Threat-intelligence review fixes (2026-11-16): provider queue starvation, submission state sync, check-file after submit, alerts never blocked by hash recording, stale results after key change, upload lock scope, worker off the event loop, Hybrid Analysis object responses, budget-only settings changes, lock-free bounded agent hashing. Regression tests in `tests/test_intelligence.py`, `tests/test_threats_agent.py`, `tests/test_threat_api.py`
+- [~] QA-round fixes (2026-11-17): an upload uses only the key it was approved with (`key_generation`), the signature check passes the file path through an environment variable instead of the PowerShell text, and `threat_scan` uses only the SHA-256 the antivirus reported (it never opens a flagged file). The deploy workflow creates `SENTINEL_INTELLIGENCE_MASTER_KEY` once in `/home/aiops/app-config/.env`, so saved provider keys survive restarts
+- [x] Unit tests all green on the dev laptop (2026-11-17): 359 passed. The 10 long-standing failures came from the `isolated_decisions` fixture lost from `tests/conftest.py` in commit `6452ffa`; it is restored, and the caller list (performance stress test, sample transfer) and the Roman Urdu chat test match the current suggest-only rules. Test records that had leaked into `decisions/2026-11-16` and `2026-11-17` were moved out of the project
+- [x] One `.env` only: the stale copy in the old export package (`dist/aiops-deploy/.env`, 2026-10-19) was removed; the project `.env` and the `.env.example` template remain
 
 ## Phase 1: Hosting (Docker + nginx + ngrok)
 
@@ -216,10 +219,37 @@ agent reinstall); I7 adds device tools (reinstall).
 - [~] I7: New read-only agent tools. `test_tcp_port` (printer 9100/515/631 + generic L4) and `driver_inventory`
   (unsigned/recent drivers on Windows; modules on Linux/macOS) in diagnostics.py; wired into the knowledge layer.
   TOOLKIT_VERSION 1.7.0->1.8.0. Bugcheck extraction not needed (codes engine reads it from crash text). Unit tests
-  green (256 passed). USER: rebuild the agent + re-run install so devices get 1.8.0 (I1-I6 work without it).
+  green (256 passed). USER: rebuild the agent + re-run install so devices get the current toolkit (now 1.10.0, see Phase 11; I1-I6 work without it).
 - [~] I8: Fleet-wide correlation. `backend/fleet_correlation.py` groups recent learned cases by playbook across
   distinct devices; adds a 'seen on N devices' note to a diagnosis (FLEET_MIN_DEVICES=3) and `GET /api/fleet`.
   Shown on the report card, recorded in the decision log. Unit tests green (`tests/test_fleet.py`).
+
+## Phase 11: Automatic threat detection and Threat Intelligence ([docs/10](docs/10-threat-behavior-analysis-plan.md))
+
+Built 2026-11-05 to 2026-11-17 (commits `6452ffa`, `9d35ab0`, `6cfa5b3`, `239ad67`). Checked on the dev laptop with unit tests and
+mocked providers only. No real provider key, upload or live device scan has been tested; all of that is on the server.
+
+- [~] P1: a security baseline job is created once per device and policy on the first report (`security_store.job_create(kind="baseline")`); `security_agent.loop()` runs it with read-only tools
+- [~] P2: agent tools `security_capabilities`, `security_events` (incremental cursors, offline spool, ACK after the server stores a batch), `security_processes`, `security_persistence`, `security_hashes` (toolkit 1.10.0)
+- [~] P3: `security_agent.correlate` plus the threat rules; findings keep their evidence and provenance
+- [~] P4: Threat Intelligence panel on the Threat Detection tab: VirusTotal and Hybrid Analysis settings, Test, hash lookups through a shared, deduplicated queue with budgets and `Retry-After` (`backend/intelligence.py`, `intelligence_jobs.py`). Keys are Fernet-encrypted (`intelligence_secrets.py`); stored in the database only when `SENTINEL_INTELLIGENCE_MASTER_KEY` is set, otherwise kept in memory
+- [~] P5: sample upload only after a separate, provider-specific, single-use approval; transfer from the agent bound to a scan item and SHA-256; submission states with `outcome_unknown`, no blind retry (`security_samples.py`, `security_api.py`)
+- [ ] P6: search and coverage exist (`GET /api/security/{device}/findings`); the behaviour timeline and process tree are not built
+- [ ] P7: pilot on one device per OS with measured CPU/RAM; then rebuild the agents and re-run the install command so devices get toolkit 1.10.0
+- [ ] On the server: re-enter the VirusTotal and Hybrid Analysis keys once after the first deploy that creates the master key; check that the worker logs show no errors; look up one known hash
+- [ ] E2E: no Threat Intelligence check in `tests/e2e/api_check.py` yet (`tests/e2e/intelligence_browser.cjs` covers the UI)
+- Known limit: Defender detections carry no SHA-256, so they get no provider lookup; the scan result says so
+
+## Phase 12: Specialist troubleshooting agents (2026-11-17)
+
+One brain, several specialists: Hardware, Operating system and Network, plus the General technician for everything else.
+Each uses the same selected AI model (`aiops-brain` on Ollama by default) with its own instructions and read-only checks.
+
+- [~] `backend/agent_brain/specialists.py`: routing by playbook, so the model never picks the specialist (hardware, battery, audio and printer go to Hardware; OS health, updates, crashes, slow PC, high usage, disk full and performance go to OS; no internet and Wi-Fi drops go to Network; security, full check-up and unmatched complaints go to General)
+- [~] The specialist's instructions open the user message of the investigate, report and verify calls. The system prompt stays shared, so Ollama's prompt cache still works
+- [~] Deep-mode investigation offers only the specialist's read-only checks (plus system overview, event logs and service status); the knowledge hints never point outside them
+- [~] Report badge in the session view, `specialist` in the decision record, `GET /api/troubleshoot/specialists`
+- Local validation: 383 unit tests passed (24 new in `tests/test_specialists.py`); offline Instant evaluation 10/10 on all seven checks. Not checked yet: the browser render of the badge, and real-model accuracy and timing on the server (`python -m backend.agent_brain.evaluate --mode fast`, then `--mode deep`)
 
 ## Alignment review (2026-11-04)
 

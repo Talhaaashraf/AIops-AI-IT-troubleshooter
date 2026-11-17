@@ -1,6 +1,8 @@
 # Automatic threat detection and behaviour analysis
 
-Date: 2026-11-05. Status: proposed implementation plan; not a completed or deployed feature.
+Date: 2026-11-05. Status: originally a proposed plan, kept below as written.
+
+**Implementation status (2026-11-17).** P1-P5 are built and covered by unit tests with mocked providers: the baseline job, incremental collectors with an offline spool, correlation, the shared VirusTotal/Hybrid Analysis queue, and approval-bound sample submission. P6 is partly built (search and coverage, no timeline or process tree). P7, the pilot, has not started. Nothing has been tested with a real provider key, real upload or live device scan, and it is not deployed. Two decisions differ from the plan text below. First, the `threat_scan` lookup uses only the SHA-256 the antivirus reported and never opens a flagged file; Defender detections without a hash get no lookup. Second, provider keys can persist: they are Fernet-encrypted in the database with `SENTINEL_INTELLIGENCE_MASTER_KEY`, which lives outside the database in the server's environment and is created once by the deploy workflow. Without that key they stay in memory, as §5 describes. The `backend/virustotal.py`, `component_tests.py` and `workbench.js` work mentioned under "Current implementation and gaps" is now integrated; `virustotal.py` only keeps compatibility routes for the shared service. Live status is tracked in [task.md](../task.md) Phase 11.
 
 ## Confirmed requirements
 

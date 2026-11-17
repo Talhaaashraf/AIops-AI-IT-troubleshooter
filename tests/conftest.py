@@ -8,6 +8,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def isolated_decisions(tmp_path, monkeypatch):
+    """Tests run real diagnoses; their decision records must not land in the project's decisions/ folder."""
+    monkeypatch.setenv("DECISIONS_DIR", str(tmp_path / "decisions"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_security_state(tmp_path, monkeypatch):
     from backend import security_store, security_chat, intelligence_secrets, security_samples
     monkeypatch.setattr(security_store, "DB_PATH", tmp_path / "security.db")

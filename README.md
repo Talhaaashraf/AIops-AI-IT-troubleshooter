@@ -23,7 +23,7 @@ AIops monitors Windows, Linux and macOS computers and troubleshoots their softwa
 | **Ask Technician** | Chat about a device's current state. |
 | **Learning** | Past tickets and the lessons the AI learned from them. |
 | **Live Troubleshooting** | Running and queued diagnoses, approved fixes, and re-checks across devices. Two diagnoses can run at once by default. |
-| **Endpoint Threat Detection** | Read-only threat scans with evidence and separately approved response actions. |
+| **Threat Detection** | Read-only threat scans with evidence and separately approved response actions (rescan, quarantine, end process, delete). Its **Threat Intelligence** panel looks up file hashes on VirusTotal and Hybrid Analysis with your own keys. Sending a file to a provider needs a separate approval naming the provider and the file. |
 | **Microsoft Removal** | Microsoft product inventory, approved removal, and installation-blocker repair on Windows. |
 | **Decisions** | The audit trail of every AI decision and every approval or rejection. |
 | **Add Agent** | A one-line install command for each OS. |
@@ -109,6 +109,16 @@ Optional per-device limits in the agent's `agent_config.json`:
   | `qwen2.5:3b` | 1.9 GB | 3 GB | Qwen Research, no commercial use | about 1-1.5 min |
 
 - **`aiops-brain`.** At startup AIops builds its own model on top of the selected one with troubleshooting principles: evidence first, suggest only, 3-4 solutions, and honest uncertainty. Relevant trusted tickets are retrieved separately for the same OS and playbook; old tickets are not embedded as global examples. This does not retrain the model's weights. The Learning tab exports a dataset for possible future fine-tuning. See [docs/05-self-improving-model.md](docs/05-self-improving-model.md).
+- **Specialist agents.** Each diagnosis is handed to one specialist, chosen by rules from the matched problem type, never by the model:
+
+  | Specialist | Problem types | Deep-mode checks it may run |
+  | --- | --- | --- |
+  | **Hardware** | hardware check, battery, sound, printer | hardware health, disk SMART, battery, input devices, drivers, printer and port tests |
+  | **Operating system** | OS health, updates, crashes, slow PC, high CPU/RAM, disk full, performance | processes, start-up and boot time, services, updates, crashes, cleanup, drivers |
+  | **Network** | no internet, Wi-Fi drops | internet stages, ping, DNS, port tests, Wi-Fi, network drivers, firewall |
+  | **General technician** | security, full check-up, anything else | every read-only check |
+
+  All of them use the same brain, the selected AI model (`aiops-brain` on Ollama by default). A specialist adds its own instructions: what to focus on and what not to conclude. It may run only the read-only checks of its own area. The report shows which specialist handled it, and so does the decision record. `GET /api/troubleshoot/specialists` lists them.
 - **Reasoning support.** Selective domain and error-code knowledge supports the diagnosis. The report includes considered hypotheses, ruled-out causes, verification steps, uncertainty, and escalation guidance. Recent similar problems across devices can produce a fleet correlation note; this is a clue, not proof of a shared cause.
 - **Deep thinking** in deep mode: the model reasons before writing the diagnosis (`DIAGNOSIS_THINKING=true`, within `OLLAMA_MAX_THINKING_CHARS`), and the reasoning streams live in the session view. Fast mode answers directly. Chat, summaries and log analysis answer directly unless you tick **Think deeper**.
 - **Checked answers.** The findings are split into those that can explain the complaint and separate problems. The AI names the one it blames (its answer must follow a JSON schema), and the server checks it: a finding that cannot cause the complaint is never reported as the cause, and "high" confidence needs a severe finding that can. Measure it with `python -m backend.agent_brain.evaluate` (inside the container).
@@ -145,6 +155,10 @@ Optional per-device limits in the agent's `agent_config.json`:
   - The agent's own folder, Windows and shared folders are never offered for removal.
   - Items that contain a link or junction are left for a person to remove.
 - **Updates.** OS and app updates install only after you tick them and confirm. AIops never restarts a computer; it tells you when a restart is needed.
+- **Threat Intelligence keys and samples.**
+  - Provider keys are entered in the dashboard, never in chat. They are encrypted, never shown again, and never sent to agents.
+  - With `SENTINEL_INTELLIGENCE_MASTER_KEY` set, the encrypted keys are kept in the database and survive restarts. The deploy workflow creates this key once on the server. Never change it, or the saved keys become unreadable and must be entered again.
+  - Only hashes are looked up automatically. A file is uploaded only after a single-use approval for that provider and that file, and the agent never opens a file the antivirus flagged in order to hash it.
 - **Records.**
   - `decisions/` holds every AI decision, approval, rejection and result as JSON, with a daily `index.md`.
   - A change is recorded twice: when it is approved, and when the device's result arrives. Both survive a server restart. If a result never arrives, the change is recorded with an unknown outcome.
@@ -179,7 +193,9 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `AGENT_AI_TIMEOUT_SECONDS` | `300` | Longest one AI call may take. Past it the rule-based diagnosis is shown. Calls with thinking use `AGENT_AI_TIMEOUT_SECONDS_DEEP` (900). |
 | `ADMIN_API_KEY` | none | `X-Admin-Key` for `DELETE /api/agents/{id}`; also the login password when `DASHBOARD_PASSWORD` is empty |
 | `DASHBOARD_PASSWORD` | none | Turns on the dashboard login |
+| `SENTINEL_INTELLIGENCE_MASTER_KEY` | empty (the deploy workflow creates one on the server) | Encrypts saved VirusTotal / Hybrid Analysis keys; without it they live only in memory |
 | `ONBOARDING_CHECK` | `true` | AI check-up the first time a device reports |
+| `THREAT_SCAN_MINUTES` | `60` | How often every online device gets a read-only threat scan; `0` means only on **Scan now** |
 | `OPEN_ENROLLMENT` | `true` | Install commands need no token; `false` asks for one-time tokens (use it with a public address) |
 | `SENTINEL_PUBLIC_URL` | browser URL | Server address written into install commands |
 | `AIOPS_SERVER_HOSTNAME` | written by the deploy workflow | The host's name: its AIops agent is shown as "This server" instead of the container |
@@ -221,7 +237,7 @@ All routes need the dashboard login, except the agent and enrollment routes.
   - `POST /api/troubleshoot/{id}/fixes/{index}/apply`
   - `POST /api/troubleshoot/{id}/solutions/{index}/decision` `{decision: done|rejected}`
   - WebSocket `/ws/troubleshoot/{id}`
-  - `GET /api/troubleshoot/playbooks|targets|sessions|audit`
+  - `GET /api/troubleshoot/playbooks|specialists|targets|sessions|audit`
 - **Performance:**
   - `POST /api/agents/{id}/performance/test`
   - `GET /api/performance/jobs/{job_id}`
@@ -238,6 +254,11 @@ All routes need the dashboard login, except the agent and enrollment routes.
   - `GET|POST /api/agent/chat`
   - `GET /api/decisions`
   - `GET /api/learning/stats|cases|lessons`, `POST /api/learning/rebuild`
+- **Threats and Threat Intelligence:**
+  - `GET /api/threats`, `GET /api/threats/{id}`, `POST /api/threats/{id}/scan|actions|proposal|marks|explain|chat`
+  - `GET|POST /api/threat-intelligence/{provider}/settings`, `POST /api/threat-intelligence/{provider}/test`, `GET /api/threat-intelligence/{provider}/files/{sha256}`
+  - `POST /api/threat-intelligence/{provider}/check-file`, `POST|DELETE /api/threat-intelligence/{provider}/uploads/{token}`, `GET /api/threat-intelligence/{provider}/analyses/{token}`
+  - `POST /api/security/investigations`, `GET /api/security/{id}/findings`, `POST /api/security/{id}/sample-transfer`
 - **Fleet:**
   - `GET /api/agents`, `/api/agents/{id}/diagnostics|security|logs|alerts|tasks|health-report|onboarding`
   - `DELETE /api/agents/{id}` (also needs the `X-Admin-Key` header)
