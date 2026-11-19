@@ -196,7 +196,7 @@
       function node() {
         const speed = 0.12 + Math.random() * 0.28, angle = Math.random() * Math.PI * 2;
         return { x: Math.random() * width, y: Math.random() * height, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-                 r: 1.2 + Math.random() * 1.8, server: Math.random() < 0.14, phase: Math.random() * Math.PI * 2 };
+                 r: 2.4 + Math.random() * 2.2, server: Math.random() < 0.18, phase: Math.random() * Math.PI * 2 };
       }
 
       function spawnPacket() {
@@ -225,7 +225,7 @@
           for (let j = i + 1; j < nodes.length; j++) {
             const a = nodes[i], b = nodes[j], d = Math.hypot(a.x - b.x, a.y - b.y);
             if (d < LINK) {
-              const alpha = (1 - d / LINK) * 0.38;
+              const alpha = (1 - d / LINK) * 0.45;
               const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
               gradient.addColorStop(0, `rgba(0, 242, 254, ${alpha})`);
               gradient.addColorStop(1, `rgba(79, 172, 254, ${alpha})`);
@@ -261,18 +261,30 @@
             return true;
           });
         }
-        // Nodes: small telemetry points, a few larger "servers" with a soft halo.
+        // Nodes: glowing telemetry points with a halo and a bright core; larger "servers" with a ring.
         for (const item of nodes) {
           const pulse = 0.6 + Math.sin(item.phase) * 0.4;
+          const near = mouse.active && Math.hypot(item.x - mouse.x, item.y - mouse.y) < CURSOR_LINK;
+          const size = item.r * (item.server ? 1.5 : 1) * (near ? 1.35 : 1);
+          const halo = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, size * 5);
+          const tint = item.server ? '79, 172, 254' : '0, 242, 254';
+          halo.addColorStop(0, `rgba(${tint}, ${0.45 * pulse})`);
+          halo.addColorStop(1, `rgba(${tint}, 0)`);
+          ctx.fillStyle = halo;
+          ctx.beginPath(); ctx.arc(item.x, item.y, size * 5, 0, Math.PI * 2); ctx.fill();
+          ctx.shadowColor = `rgba(${tint}, 0.9)`; ctx.shadowBlur = 12;
           if (item.server) {
-            ctx.fillStyle = `rgba(79, 172, 254, ${0.12 * pulse})`;
-            ctx.beginPath(); ctx.arc(item.x, item.y, item.r * 5, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = 'rgba(160, 225, 255, 0.95)';
-            ctx.fillRect(item.x - 2.5, item.y - 2.5, 5, 5);
+            ctx.strokeStyle = `rgba(160, 225, 255, ${0.55 + 0.4 * pulse})`; ctx.lineWidth = 1.4;
+            ctx.beginPath(); ctx.arc(item.x, item.y, size + 4, 0, Math.PI * 2); ctx.stroke();
+            ctx.fillStyle = 'rgba(200, 240, 255, 1)';
+            ctx.fillRect(item.x - size * 0.75, item.y - size * 0.75, size * 1.5, size * 1.5);
           } else {
-            ctx.fillStyle = `rgba(0, 242, 254, ${0.55 + 0.4 * pulse})`;
-            ctx.beginPath(); ctx.arc(item.x, item.y, item.r, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = `rgba(0, 242, 254, ${0.8 + 0.2 * pulse})`;
+            ctx.beginPath(); ctx.arc(item.x, item.y, size, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'rgba(230, 255, 255, 0.95)';  // white-hot core
+            ctx.beginPath(); ctx.arc(item.x, item.y, size * 0.45, 0, Math.PI * 2); ctx.fill();
           }
+          ctx.shadowBlur = 0;
         }
       }
 
