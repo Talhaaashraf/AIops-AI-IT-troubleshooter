@@ -165,12 +165,21 @@ def snapshot_with_alerts(report):
     return report
 
 
-async def start_monitor():
-    logger.info("Registered FastAPI routes:")
+def route_lines():
+    """One log line per registered route. FastAPI 0.143 keeps an included router as one entry without a .path
+    (its routes are in the OpenAPI schema); reading route.path there crashed the whole startup."""
+    lines = []
     for route in app.routes:
         methods = ",".join(sorted(getattr(route, "methods", set()) or []))
-        route_line = f"  {methods or 'WEBSOCKET'} {route.path}"
-        logger.info(route_line)
+        path = getattr(route, "path", None) or getattr(getattr(route, "router", None), "prefix", None) or type(route).__name__
+        lines.append(f"  {methods or ('WEBSOCKET' if hasattr(route, 'path') else 'ROUTER')} {path}")
+    return lines
+
+
+async def start_monitor():
+    logger.info("Registered FastAPI routes:")
+    for line in route_lines():
+        logger.info(line)
     if auth_enabled():
         logger.info("Dashboard login is enabled (DASHBOARD_PASSWORD/ADMIN_API_KEY set).")
     else:

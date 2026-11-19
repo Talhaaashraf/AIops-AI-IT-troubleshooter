@@ -197,3 +197,11 @@ def test_greetings_are_answered_without_the_model(monkeypatch):
     assert view["state"] == "done" and view["steps"] == [] and view["reply"]["plain_explanation"].startswith("Hello")
     with pytest.raises(HTTPException):
         asyncio.run(main.chat_start({"message": "   "}))
+
+
+def test_startup_route_logging_handles_included_routers():
+    """FastAPI 0.143 lists an included router (threat intelligence, security) without a .path; logging the routes
+    at startup used to crash the whole app there."""
+    lines = main.route_lines()
+    assert any("/api/chat" in line for line in lines)
+    assert len(lines) == len(main.app.routes)
