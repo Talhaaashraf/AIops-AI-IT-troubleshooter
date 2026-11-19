@@ -43,11 +43,12 @@
   }
   for (const [provider, label] of Object.entries(providers)) {
     const card = document.createElement('form'); card.className = 'ti-provider-card'; card.id = `ti-config-${provider}`;
-    card.innerHTML = `<h3>${label}</h3><label>API key<input id="ti-key-${provider}" class="field-input" type="password" autocomplete="off" maxlength="256" placeholder="Leave blank to keep current key"></label><button type="button" class="ghost-button" data-show="${provider}">Show key</button>
+    card.innerHTML = `<h3>${label}</h3><label>API key<input id="ti-key-${provider}" class="field-input" type="password" autocomplete="off" maxlength="256" placeholder="Leave blank to keep the saved keys"></label><div class="button-row"><button type="button" class="ghost-button" data-show="${provider}">Show key</button><button type="button" class="ghost-button" data-add="${provider}">Add as extra key</button></div>
+      <p class="soft-label">Up to 5 keys. When one key reaches its limit or is rejected, the next key is used. Uploads use key 1. A key typed here and saved with Save / update replaces all saved keys.</p><div id="ti-keys-${provider}" class="ti-keys"></div>
       <label><input id="ti-authorized-${provider}" type="checkbox"> Provider permission covers this business workflow</label><label>Permission or licence basis<input id="ti-basis-${provider}" class="field-input" maxlength="500" placeholder="Describe the licence or written provider permission"></label>
       <label><input id="ti-enabled-${provider}" type="checkbox"> Enable external hash lookups</label><label><input id="ti-submit-${provider}" type="checkbox"> Provider permission also covers public file submission</label>
-      <div class="button-row"><label>Requests/minute<input id="ti-minute-${provider}" class="field-input" type="number" min="1" max="100"></label><label>Requests/day<input id="ti-day-${provider}" class="field-input" type="number" min="1" max="100000"></label></div>
-      <div class="button-row"><button>Save / update</button><button type="button" data-test="${provider}" class="ghost-button">Test connection</button><button type="button" data-delete="${provider}" class="ghost-button">Delete key</button></div><p id="ti-status-${provider}" role="status">Loading configuration...</p>`;
+      <div class="button-row"><label>Requests/minute per key<input id="ti-minute-${provider}" class="field-input" type="number" min="1" max="100"></label><label>Requests/day per key<input id="ti-day-${provider}" class="field-input" type="number" min="1" max="100000"></label></div>
+      <div class="button-row"><button>Save / update</button><button type="button" data-test="${provider}" class="ghost-button">Test connection</button><button type="button" data-delete="${provider}" class="ghost-button">Delete all keys</button></div><p id="ti-status-${provider}" role="status">Loading configuration...</p>`;
     $('ti-settings').appendChild(card);
     card.onsubmit = (event) => { event.preventDefault(); action(card.querySelector('button:not([type="button"])'), async () => {
       const input = $(`ti-key-${provider}`);
@@ -59,6 +60,12 @@
       finally { input.value = ''; input.type = 'password'; card.querySelector('[data-show]').textContent = 'Show key'; }
     }, `ti-status-${provider}`); };
     card.querySelector('[data-show]').onclick = (event) => { const input = $(`ti-key-${provider}`); input.type = input.type === 'password' ? 'text' : 'password'; event.target.textContent = input.type === 'password' ? 'Show key' : 'Hide key'; };
+    card.querySelector('[data-add]').onclick = (event) => action(event.target, async () => {
+      const input = $(`ti-key-${provider}`);
+      if (!input.value.trim()) throw Error('Type the extra API key first.');
+      try { renderSettings(await api(`/${provider}/settings`, post({add_api_key: input.value.trim()}))); }
+      finally { input.value = ''; input.type = 'password'; card.querySelector('[data-show]').textContent = 'Show key'; }
+    }, `ti-status-${provider}`);
     card.querySelector('[data-delete]').onclick = (event) => action(event.target, async () => { renderSettings(await api(`/${provider}/settings`, post({api_key: ''}))); }, `ti-status-${provider}`);
     card.querySelector('[data-test]').onclick = (event) => action(event.target, async () => {
       const job = await api(`/${provider}/test`, post({}));
@@ -71,9 +78,25 @@
     $(`ti-authorized-${p}`).checked = data.policy.business_authorized; $(`ti-enabled-${p}`).checked = data.policy.enabled;
     $(`ti-submit-${p}`).checked = data.policy.upload_authorized; $(`ti-basis-${p}`).value = data.policy.use_basis;
     $(`ti-minute-${p}`).value = data.policy.per_minute; $(`ti-day-${p}`).value = data.policy.per_day;
-    textResult(`ti-status-${p}`, `${data.configured ? 'Key configured' : 'No usable key'} · ${data.enabled ? 'Enabled' : 'Disabled'} · ${data.connection.state}. Storage: ${data.storage}. Requests: ${data.usage.minute}/${data.policy.per_minute} this minute; ${data.usage.day}/${data.policy.per_day} today. Last success: ${stamp(data.connection.last_success)}. ${data.credential_error || ''}`);
-    if (data.policy.retry_at > Date.now()/1000) paragraph($(`ti-status-${p}`), `Rate limited until ${stamp(data.policy.retry_at)}`);
+    textResult(`ti-status-${p}`, `${data.configured ? `${(data.keys || []).length} key(s) configured` : 'No usable key'} · ${data.enabled ? 'Enabled' : 'Disabled'} · ${data.connection.state}. Storage: ${data.storage}. Requests: ${data.usage.minute}/${data.policy.per_minute} this minute; ${data.usage.day}/${data.policy.per_day} today. Last success: ${stamp(data.connection.last_success)}. ${data.credential_error || ''}`);
+    renderKeys(p, data);
     paragraph($(`ti-status-${p}`), `Capabilities: ${data.capabilities.verified ? 'Account authentication checked' : 'Not verified'}. Private submission is not assumed. ${data.capabilities.phase === 'environments' ? 'Environment discovery pending.' : ''}`);
+  }
+  function renderKeys(p, data) {
+    // Only slot numbers and usage come from the server: never key text.
+    const box = $(`ti-keys-${p}`); box.replaceChildren();
+    for (const item of data.keys || []) {
+      const row = document.createElement('div'); row.className = 'button-row ti-key-row';
+      const label = document.createElement('span');
+      const waiting = item.wait_seconds > 0 ? `resting ${Math.ceil(item.wait_seconds / 60)} min` : 'ready';
+      label.textContent = `Key ${item.slot}${item.primary ? ' (primary, used for uploads)' : ''} · ${waiting} · ${item.usage.minute}/${data.policy.per_minute} this minute, ${item.usage.day}/${data.policy.per_day} today`;
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'ghost-button'; remove.textContent = 'Remove';
+      remove.onclick = () => {
+        if (item.primary && !confirm('Remove key 1? The next key becomes the primary: pending approvals and in-flight submissions of key 1 are cancelled.')) return;
+        action(remove, async () => renderSettings(await api(`/${p}/settings`, post({remove_key: item.slot}))), `ti-status-${p}`);
+      };
+      row.append(label, remove); box.appendChild(row);
+    }
   }
   async function refreshSettings(provider) {
     if (provider) return renderSettings(await api(`/${provider}/settings`));

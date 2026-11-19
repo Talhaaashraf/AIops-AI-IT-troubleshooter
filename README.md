@@ -157,6 +157,7 @@ Optional per-device limits in the agent's `agent_config.json`:
 - **Updates.** OS and app updates install only after you tick them and confirm. AIops never restarts a computer; it tells you when a restart is needed.
 - **Threat Intelligence keys and samples.**
   - Provider keys are entered in the dashboard, never in chat. They are encrypted, never shown again, and never sent to agents.
+  - Each provider can hold up to 5 keys (**Add as extra key**). The budget (requests per minute and per day) applies to each key. A lookup uses the first key that is within its budget. A key that gets a rate limit (429) or is rejected (401) rests, and the request moves on to the next key. Uploads and their status checks always use key 1, the account the approval was given for. Adding or removing an extra key keeps approvals and cached reports; replacing key 1 counts as a new account.
   - With `SENTINEL_INTELLIGENCE_MASTER_KEY` set, the encrypted keys are kept in the database and survive restarts. The deploy workflow creates this key once on the server. Never change it, or the saved keys become unreadable and must be entered again.
   - Only hashes are looked up automatically. A file is uploaded only after a single-use approval for that provider and that file, and the agent never opens a file the antivirus flagged in order to hash it.
 - **Records.**
@@ -185,6 +186,7 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `OLLAMA_MAX_PARALLEL` | `1` | AI calls that run at the same time; more than one crawls on a laptop CPU |
 | `OLLAMA_THINK` | `false` | Thinking for calls that do not choose for themselves |
 | `GROQ_API_KEY`, `GROQ_MODEL` | none | Optional cloud provider |
+| `GROQ_API_KEYS` | empty | More Groq keys, comma-separated; a rate-limited or rejected key rests and the next one answers |
 | `DIAGNOSIS_MODE` | `fast` | Default speed: `instant`, `fast` or `deep` |
 | `DIAGNOSIS_THINKING` | `true` | Deep thinking for diagnosis reports in deep mode (fast mode answers directly) |
 | `OLLAMA_MAX_THINKING_CHARS` | `6000` | Thinking stops here and the answer is written from the reasoning so far |

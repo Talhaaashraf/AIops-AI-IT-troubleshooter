@@ -264,6 +264,21 @@ Ask Technician becomes **AI Chat**: the user describes a problem in plain words,
 - [~] E2E: `tests/e2e/api_check.py` step `aichat` (never approves the card)
 - Local validation: 393 unit tests passed (10 new in `tests/test_chat_agent.py`). The JavaScript was not syntax-checked by a tool on the laptop (no working Node), so the browser render is unchecked. Server (user): `api_check.py <password> <device> aichat`, open AI Chat and ask "internet is slow, check it", time the answer on the CPU server
 
+## Phase 14: Several API keys per provider (2026-11-19)
+
+- [~] VirusTotal and Hybrid Analysis: up to 5 keys each, saved as one encrypted list (`intelligence_secrets.get_all/put_all`; a key saved in the old one-key format still reads). Settings accept `api_key` (replace all), `api_keys`, `add_api_key` and `remove_key`. Status lists keys by number, readiness and usage only, never key text
+- [~] Each key has its own budget and its own backoff. A lookup takes the first ready key within budget. A 429 or 401 makes that key rest, and the request moves on to the next key; a lone key reports its own error. Uploads and polls stay on key 1 (the approved account). Only a new key 1 rotates the configuration generation; extra keys can be added or removed without cancelling approvals, submissions or cached reports
+- [~] Groq: `GROQ_API_KEYS` (comma-separated) alongside `GROQ_API_KEY`; a 429 or 401 key rests and the next answers (`backend/llm/groq_provider.py`)
+- [~] UI: Add as extra key, a per-key list with Remove (confirmation for key 1), per-key budget labels; e2e browser mock updated
+- Local validation: 20 new tests (`tests/test_intelligence_keys.py`, `tests/test_groq_keys.py`), all intelligence tests green. Not checked: the browser render, and real provider keys (server, user)
+
+## Phase 15: New login page (2026-11-19)
+
+- [~] `frontend/login.html`: full-screen animated neural-mesh canvas (nodes, glowing links, data packets travelling along links, lines to the cursor), a glass card with the "AIops Core" title, a status pill, a password field with show/hide, Remember session, Forgot credentials, and a gradient button with a loading state. It is self-contained (no CDN, so it works on a LAN server without internet). The animation pauses in background tabs and honours reduced motion
+- [~] Kept honest: the backend has one dashboard password, so there is no Operator ID field and no SSO/SAML button. "Forgot credentials" explains where the password is set, and the status pill states only what is true
+- [~] Remember session is real: ticked keeps the 30-day cookie, unticked gives a browser-session cookie. Clients that send no checkbox (scripts, e2e) keep 30 days. Test in `tests/test_chat_agent.py`
+- Not checked: the look in a real browser (no browser on the laptop)
+
 ## Alignment review (2026-11-04)
 
 - Reviewed the root task tracker, historical plans, reachable Git history, current backend paths, all 14 local decision JSON records, and local database/model metadata. The local database has no saved sessions, learned cases, tasks, or remediation audit rows; it does not establish the Ubuntu server's current state.

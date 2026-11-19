@@ -1,5 +1,6 @@
 # Versions the stack was tested with (Docker image, Python 3.12). Upgrade deliberately and re-run the tests.
 fastapi==0.143.0
+starlette==1.10.0
 uvicorn[standard]==0.54.0
 psutil==7.2.2
 httpx==0.28.1

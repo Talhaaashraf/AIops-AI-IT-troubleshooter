@@ -12,6 +12,7 @@ async function run(browser, root) {
   page.on('pageerror', (error) => errors.push(error.message));
   const config = (provider) => ({provider, configured:true, enabled:true, storage:'encrypted-memory',
     policy:{enabled:true,business_authorized:true,upload_authorized:true,use_basis:'Mock permission only',per_minute:4,per_day:500,retry_at:0},
+    keys:[{slot:1,primary:true,wait_seconds:0,usage:{minute:0,day:0}}],max_keys:5,
     usage:{minute:0,day:0},connection:{state:'connected',last_success:1},capabilities:{verified:true,environments:[120]}});
   const script = await fs.readFile(path.join(root,'frontend/threat_intelligence.js'),'utf8');
   await page.route('**/*', async (route) => {
@@ -37,7 +38,7 @@ async function run(browser, root) {
   try {
     await page.goto('https://sentinel.test/');
     await page.locator('#threat-intelligence details').first().evaluate(el=>el.open=true);
-    await page.getByText('Key configured', {exact:false}).first().waitFor();
+    await page.getByText('key(s) configured', {exact:false}).first().waitFor();
     await page.locator('#ti-key-virustotal').fill('test-key-not-real');
     await page.locator('[data-show="virustotal"]').click();
     assert.equal(await page.locator('#ti-key-virustotal').getAttribute('type'),'text');

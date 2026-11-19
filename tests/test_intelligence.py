@@ -436,9 +436,9 @@ def test_a_poll_is_refused_if_the_key_rotates_mid_pass(monkeypatch, transport):
     enable(); token = submitted('virustotal')
     calls, _ = transport
     reserve = intel._reserve
-    def rotate_then_reserve(provider, expect=None):
+    def rotate_then_reserve(provider, expect=None, tried=frozenset()):
         intel.configure('virustotal', {'api_key': 'n'*64})  # rotated after the pass read the key generation
-        return reserve(provider, expect)
+        return reserve(provider, expect, tried)
     monkeypatch.setattr(intel, '_reserve', rotate_then_reserve)
     samples.poll_due()
     monkeypatch.setattr(intel, '_reserve', reserve)
@@ -452,8 +452,8 @@ def test_a_late_429_for_a_replaced_key_does_not_block_the_new_key(monkeypatch, t
     enable(); calls, response = transport
     response.update(status=429, headers={'Retry-After': '86400'})
     reserve = intel._reserve
-    def reserve_then_rotate(provider, expect=None):
-        result = reserve(provider, expect)
+    def reserve_then_rotate(provider, expect=None, tried=frozenset()):
+        result = reserve(provider, expect, tried)
         intel.configure('virustotal', {'api_key': 'n'*64})  # the key is replaced while the request is in flight
         return result
     monkeypatch.setattr(intel, '_reserve', reserve_then_rotate)

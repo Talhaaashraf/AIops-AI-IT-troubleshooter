@@ -205,3 +205,20 @@ def test_startup_route_logging_handles_included_routers():
     lines = main.route_lines()
     assert any("/api/chat" in line for line in lines)
     assert len(lines) == len(main.app.routes)
+
+
+def test_the_login_page_and_remember_session(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "check-pass-123")
+    client = TestClient(main.app)
+    page = client.get("/login")
+    assert page.status_code == 200 and "Authenticate &amp; Launch Console" in page.text
+    assert "cdn." not in page.text  # works on a LAN server without internet
+    assert client.post("/login", data={"password": "wrong"}, follow_redirects=False).headers["location"] == "/login?error=1"
+    remembered = client.post("/login", data={"password": "check-pass-123", "remember_present": "1", "remember": "on"}, follow_redirects=False)
+    assert remembered.status_code == 303 and "Max-Age=2592000" in remembered.headers["set-cookie"]
+    session_only = client.post("/login", data={"password": "check-pass-123", "remember_present": "1"}, follow_redirects=False)
+    assert session_only.status_code == 303 and "Max-Age" not in session_only.headers["set-cookie"]
+    scripted = client.post("/login", data={"password": "check-pass-123"}, follow_redirects=False)
+    assert "Max-Age=2592000" in scripted.headers["set-cookie"]  # scripts and e2e checks keep the 30 days

@@ -1,40 +1,300 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AIops · Sign in</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script>
-    try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
-  </script>
+  <title>AIops Core · Sign in</title>
+  <!-- Self-contained on purpose: the login page must work on a LAN server without internet (no CDN). -->
   <style>
-    .login-shell { display: grid; place-items: center; min-height: 100vh; padding: 20px; }
-    .login-card { width: min(400px, 100%); padding: 34px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
-    .login-card .brand { margin: 0 0 8px; }
-    .login-card .subheading { margin: 0 0 24px; font-size: .9rem; }
-    .login-card .primary-button { width: 100%; margin-top: 16px; padding: 12px; }
-    .login-error { margin-top: 10px; padding: 9px 12px; border-radius: var(--radius-sm); color: var(--bad); background: var(--bad-soft); font-size: .84rem; }
+    :root {
+      --bg: #050811;
+      --cyan: #00f2fe;
+      --blue: #4facfe;
+      --card: rgba(15, 23, 42, 0.65);
+      --line: rgba(0, 242, 254, 0.22);
+      --text: #e6f1ff;
+      --muted: #8ea3c4;
+      --field: rgba(2, 6, 23, 0.6);
+      --bad: #f87171;
+      --ok: #34d399;
+      --font: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { background: var(--bg); color: var(--text); font-family: var(--font); overflow-x: hidden; }
+    #mesh { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
+    .vignette { position: fixed; inset: 0; z-index: 1; pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 0%, rgba(5, 8, 17, 0.35) 55%, rgba(5, 8, 17, 0.9) 100%); }
+    .shell { position: relative; z-index: 2; min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+
+    .card { width: min(440px, 100%); padding: 34px 32px 28px; border-radius: 20px; background: var(--card);
+      border: 1px solid var(--line); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+      box-shadow: 0 0 0 1px rgba(79, 172, 254, 0.06) inset, 0 20px 60px rgba(0, 0, 0, 0.55), 0 0 48px rgba(0, 242, 254, 0.10);
+      animation: rise .6s ease-out both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .badge { width: 52px; height: 52px; flex: none; display: grid; place-items: center; border-radius: 14px;
+      background: linear-gradient(135deg, rgba(0, 242, 254, 0.18), rgba(79, 172, 254, 0.18)); border: 1px solid rgba(0, 242, 254, 0.45);
+      box-shadow: 0 0 22px rgba(0, 242, 254, 0.28); }
+    .badge svg { width: 28px; height: 28px; }
+    h1 { margin: 0; font-size: 1.55rem; letter-spacing: .2px; }
+    h1 span { background: linear-gradient(90deg, var(--cyan), var(--blue)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .subtitle { margin: 4px 0 0; color: var(--muted); font-size: .86rem; line-height: 1.4; }
+
+    .status { display: inline-flex; align-items: center; gap: 8px; margin: 20px 0 22px; padding: 6px 12px; border-radius: 999px;
+      font-size: .74rem; color: #bff7e0; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.28); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); animation: pulse 1.8s infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, .7); } 70% { box-shadow: 0 0 0 9px rgba(52, 211, 153, 0); } 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); } }
+
+    label.field { display: block; margin-bottom: 7px; font-size: .8rem; color: var(--muted); letter-spacing: .3px; }
+    .input-wrap { position: relative; }
+    input[type=password], input[type=text] { width: 100%; padding: 13px 46px 13px 14px; border-radius: 12px; font: inherit; font-size: .95rem;
+      color: var(--text); background: var(--field); border: 1px solid rgba(148, 163, 184, 0.22); outline: none; transition: border-color .2s, box-shadow .2s; }
+    input[type=password]:focus, input[type=text]:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0, 242, 254, 0.16), 0 0 18px rgba(0, 242, 254, 0.18); }
+    .toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; display: grid; place-items: center;
+      border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+    .toggle:hover, .toggle:focus-visible { color: var(--cyan); background: rgba(0, 242, 254, 0.08); outline: none; }
+    .toggle svg { width: 20px; height: 20px; }
+
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 20px; font-size: .83rem; flex-wrap: wrap; }
+    .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
+    .check input { width: 16px; height: 16px; accent-color: var(--cyan); }
+    .link { color: var(--blue); background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+    .link:hover, .link:focus-visible { color: var(--cyan); text-decoration: underline; outline: none; }
+    .help { margin: -8px 0 18px; padding: 10px 12px; border-radius: 10px; font-size: .8rem; line-height: 1.5; color: var(--muted);
+      background: rgba(79, 172, 254, 0.07); border: 1px solid rgba(79, 172, 254, 0.2); }
+    .help code { color: var(--text); }
+
+    .cta { position: relative; width: 100%; padding: 14px; border: 0; border-radius: 12px; cursor: pointer; font: inherit; font-weight: 600; font-size: .95rem;
+      color: #031018; background: linear-gradient(90deg, var(--cyan), var(--blue)); box-shadow: 0 8px 24px rgba(0, 242, 254, 0.25);
+      transition: transform .15s, box-shadow .2s, filter .2s; display: inline-flex; align-items: center; justify-content: center; gap: 10px; }
+    .cta:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0, 242, 254, 0.35); filter: brightness(1.05); }
+    .cta:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+    .cta:disabled { cursor: progress; transform: none; filter: saturate(.8); }
+    .spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(3, 16, 24, 0.3); border-top-color: #031018; animation: spin .8s linear infinite; display: none; }
+    .loading .spinner { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; font-size: .84rem; color: #fecaca; background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.35); }
+    .foot { margin: 20px 0 0; text-align: center; font-size: .74rem; color: #64748b; line-height: 1.5; }
+    [hidden] { display: none !important; }
+
+    @media (max-width: 480px) { .card { padding: 26px 20px 22px; border-radius: 16px; } h1 { font-size: 1.35rem; } .badge { width: 46px; height: 46px; } }
+    @media (prefers-reduced-motion: reduce) { .card, .dot, .spinner { animation: none; } .cta:hover { transform: none; } }
   </style>
 </head>
 <body>
-  <div class="login-shell">
-    <form class="login-card" method="post" action="/login">
+  <canvas id="mesh" aria-hidden="true"></canvas>
+  <div class="vignette"></div>
+
+  <main class="shell">
+    <form id="login" class="card" method="post" action="/login" novalidate>
       <div class="brand">
-        <span class="brand-mark"><svg viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5.3-3.4 10-8 11-4.6-1-8-5.7-8-11V5z"/></svg></span>
-        <div><strong><span class="brand-ai">AI</span>ops</strong><small>AI IT TROUBLESHOOTER</small></div>
+        <div class="badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="url(#g)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#00f2fe"/><stop offset="1" stop-color="#4facfe"/></linearGradient></defs>
+            <path d="M12 2l8 3v6c0 5.3-3.4 10-8 11-4.6-1-8-5.7-8-11V5z"/><circle cx="12" cy="11" r="2.2"/><path d="M12 8.8V6.5M12 13.2v2.3M9.8 11H7.5M14.2 11h2.3"/>
+          </svg>
+        </div>
+        <div>
+          <h1><span>AIops</span> Core</h1>
+          <p class="subtitle">Autonomous Infrastructure &amp; Incident Troubleshooting</p>
+        </div>
       </div>
-      <p class="subheading">Sign in to diagnose and fix your devices.</p>
-      <label class="field-label" for="password">Dashboard password</label>
-      <input id="password" class="field-input" name="password" type="password" autocomplete="current-password" autofocus required>
-      <div id="login-error" class="login-error hidden">Incorrect password.</div>
-      <button class="primary-button" type="submit">Sign in</button>
+
+      <!-- Only true statements: this page was served, so the server is up; the AI only suggests. -->
+      <div class="status" role="status"><span class="dot" aria-hidden="true"></span>AIops server: Online | AI: suggest-only, you approve every change</div>
+
+      <label class="field" for="password">Security Passkey / Dashboard password</label>
+      <div class="input-wrap">
+        <input id="password" name="password" type="password" autocomplete="current-password" autofocus required aria-describedby="login-error">
+        <button id="toggle" class="toggle" type="button" aria-label="Show password" aria-pressed="false">
+          <svg id="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg id="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M3 3l18 18"/><path d="M10.6 5.1A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+        </button>
+      </div>
+
+      <div class="row">
+        <input type="hidden" name="remember_present" value="1">
+        <label class="check"><input type="checkbox" name="remember" value="on" checked> Remember session (30 days)</label>
+        <button id="forgot" class="link" type="button" aria-expanded="false" aria-controls="help">Forgot credentials?</button>
+      </div>
+      <div id="help" class="help" hidden>
+        The password is <code>DASHBOARD_PASSWORD</code> in the server's <code>.env</code> file. Ask the person who runs the
+        AIops server; it cannot be reset from this page.
+      </div>
+
+      <button id="submit" class="cta" type="submit"><span class="spinner" aria-hidden="true"></span><span id="cta-text">Authenticate &amp; Launch Console</span></button>
+      <p id="login-error" class="error" role="alert" hidden>Incorrect password.</p>
+
+      <p class="foot">Sign-in uses the dashboard password set on the server.<br>AIops never changes a device without your approval.</p>
     </form>
-  </div>
+  </main>
+
   <script>
-    if (new URLSearchParams(location.search).get('error')) {
-      document.getElementById('login-error').classList.remove('hidden');
-    }
+    // ---- Form: show/hide password, help, loading state, error from the server ----
+    (() => {
+      const form = document.getElementById('login');
+      const input = document.getElementById('password');
+      const toggle = document.getElementById('toggle');
+      const error = document.getElementById('login-error');
+      if (new URLSearchParams(location.search).get('error')) error.hidden = false;
+      toggle.addEventListener('click', () => {
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        toggle.setAttribute('aria-pressed', String(show));
+        toggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+        document.getElementById('eye').hidden = show;
+        document.getElementById('eye-off').hidden = !show;
+        input.focus();
+      });
+      document.getElementById('forgot').addEventListener('click', (event) => {
+        const help = document.getElementById('help');
+        help.hidden = !help.hidden;
+        event.currentTarget.setAttribute('aria-expanded', String(!help.hidden));
+      });
+      form.addEventListener('submit', (event) => {
+        if (!input.value) { event.preventDefault(); error.textContent = 'Enter the dashboard password.'; error.hidden = false; input.focus(); return; }
+        input.type = 'password';  // never send the page away with the password visible
+        const button = document.getElementById('submit');
+        button.disabled = true;
+        button.classList.add('loading');
+        document.getElementById('cta-text').textContent = 'Authenticating...';
+      });
+      // Back button after a failed or slow attempt: never leave the button stuck in its loading state.
+      window.addEventListener('pageshow', () => {
+        const button = document.getElementById('submit');
+        button.disabled = false;
+        button.classList.remove('loading');
+        document.getElementById('cta-text').textContent = 'Authenticate & Launch Console';
+      });
+    })();
+
+    // ---- Background: neural mesh of telemetry nodes, travelling data packets, cursor links ----
+    (() => {
+      const canvas = document.getElementById('mesh');
+      const ctx = canvas.getContext('2d');
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+      const LINK = 150, CURSOR_LINK = 190;
+      let width = 0, height = 0, dpr = 1, nodes = [], packets = [], frame = null, last = 0;
+      const mouse = { x: -9999, y: -9999, active: false };
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        width = window.innerWidth; height = window.innerHeight;
+        canvas.width = Math.floor(width * dpr); canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const count = Math.max(28, Math.min(95, Math.round(width * height / 16000)));
+        while (nodes.length < count) nodes.push(node());
+        nodes.length = count;
+        for (const item of nodes) { item.x = Math.min(item.x, width); item.y = Math.min(item.y, height); }
+        packets = packets.filter((packet) => packet.a < nodes.length && packet.b < nodes.length);
+        if (reduced.matches) draw(0);
+      }
+
+      function node() {
+        const speed = 0.12 + Math.random() * 0.28, angle = Math.random() * Math.PI * 2;
+        return { x: Math.random() * width, y: Math.random() * height, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                 r: 1.2 + Math.random() * 1.8, server: Math.random() < 0.14, phase: Math.random() * Math.PI * 2 };
+      }
+
+      function spawnPacket() {
+        // A pulse leaves a random node toward one of its current neighbours.
+        const a = Math.floor(Math.random() * nodes.length);
+        const near = [];
+        for (let b = 0; b < nodes.length; b++) {
+          if (b !== a && Math.hypot(nodes[a].x - nodes[b].x, nodes[a].y - nodes[b].y) < LINK) near.push(b);
+        }
+        if (near.length) packets.push({ a, b: near[Math.floor(Math.random() * near.length)], t: 0, speed: 0.006 + Math.random() * 0.01 });
+      }
+
+      function draw(dt) {
+        ctx.clearRect(0, 0, width, height);
+        const step = Math.min(dt / 16.7, 3);
+        for (const item of nodes) {
+          if (!reduced.matches) {
+            item.x += item.vx * step; item.y += item.vy * step;
+            if (item.x < 0 || item.x > width) item.vx *= -1;
+            if (item.y < 0 || item.y > height) item.vy *= -1;
+            item.phase += 0.03 * step;
+          }
+        }
+        // Links between nearby nodes, brighter when closer.
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i], b = nodes[j], d = Math.hypot(a.x - b.x, a.y - b.y);
+            if (d < LINK) {
+              const alpha = (1 - d / LINK) * 0.38;
+              const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+              gradient.addColorStop(0, `rgba(0, 242, 254, ${alpha})`);
+              gradient.addColorStop(1, `rgba(79, 172, 254, ${alpha})`);
+              ctx.strokeStyle = gradient; ctx.lineWidth = 0.8;
+              ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+            }
+          }
+        }
+        // Cursor: nearby nodes reach out to it.
+        if (mouse.active) {
+          for (const item of nodes) {
+            const d = Math.hypot(item.x - mouse.x, item.y - mouse.y);
+            if (d < CURSOR_LINK) {
+              ctx.strokeStyle = `rgba(0, 242, 254, ${(1 - d / CURSOR_LINK) * 0.6})`; ctx.lineWidth = 1;
+              ctx.shadowColor = 'rgba(0, 242, 254, 0.8)'; ctx.shadowBlur = 8;
+              ctx.beginPath(); ctx.moveTo(item.x, item.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke();
+              ctx.shadowBlur = 0;
+            }
+          }
+        }
+        // Data packets travelling along live links (dropped when their link stretches too far).
+        if (!reduced.matches) {
+          if (packets.length < 26 && Math.random() < 0.12 * step) spawnPacket();
+          packets = packets.filter((packet) => {
+            const a = nodes[packet.a], b = nodes[packet.b];
+            if (!a || !b || Math.hypot(a.x - b.x, a.y - b.y) > LINK * 1.15) return false;
+            packet.t += packet.speed * step;
+            if (packet.t >= 1) return false;
+            const x = a.x + (b.x - a.x) * packet.t, y = a.y + (b.y - a.y) * packet.t;
+            const glow = ctx.createRadialGradient(x, y, 0, x, y, 7);
+            glow.addColorStop(0, 'rgba(230, 255, 255, 0.95)'); glow.addColorStop(0.35, 'rgba(0, 242, 254, 0.75)'); glow.addColorStop(1, 'rgba(0, 242, 254, 0)');
+            ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+            return true;
+          });
+        }
+        // Nodes: small telemetry points, a few larger "servers" with a soft halo.
+        for (const item of nodes) {
+          const pulse = 0.6 + Math.sin(item.phase) * 0.4;
+          if (item.server) {
+            ctx.fillStyle = `rgba(79, 172, 254, ${0.12 * pulse})`;
+            ctx.beginPath(); ctx.arc(item.x, item.y, item.r * 5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'rgba(160, 225, 255, 0.95)';
+            ctx.fillRect(item.x - 2.5, item.y - 2.5, 5, 5);
+          } else {
+            ctx.fillStyle = `rgba(0, 242, 254, ${0.55 + 0.4 * pulse})`;
+            ctx.beginPath(); ctx.arc(item.x, item.y, item.r, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+      }
+
+      function loop(now) {
+        const dt = last ? now - last : 16.7;
+        last = now;
+        draw(dt);
+        frame = requestAnimationFrame(loop);
+      }
+
+      function start() { if (frame === null && !reduced.matches && !document.hidden) { last = 0; frame = requestAnimationFrame(loop); } }
+      function stop() { if (frame !== null) { cancelAnimationFrame(frame); frame = null; } }
+
+      window.addEventListener('resize', resize);
+      window.addEventListener('pointermove', (event) => { mouse.x = event.clientX; mouse.y = event.clientY; mouse.active = true; }, { passive: true });
+      document.addEventListener('pointerleave', () => { mouse.active = false; });
+      window.addEventListener('blur', () => { mouse.active = false; });
+      document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));  // no work in a background tab
+      reduced.addEventListener?.('change', () => { stop(); start(); if (reduced.matches) draw(0); });
+      resize();
+      start();
+    })();
   </script>
 </body>
 </html>

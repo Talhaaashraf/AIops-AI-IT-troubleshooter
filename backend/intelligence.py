@@ -48,18 +48,48 @@ def allowed(provider):
     return bool(rules["enabled"] and rules["business_authorized"] and vault.get(provider))
 
 
+KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
+
+
+def _keys(provider, rules):
+    """[{"id", "key"}], primary first. A key saved before lists existed carries the current key generation as its id."""
+    return vault.get_all(provider, rules.get("key_generation"))
+
+
+def _usage_name(provider, slot):
+    return f"{provider}#{slot}"
+
+
+def _usage(db, name, since):
+    return db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (name, since)).fetchone()[0]
+
+
+def _wait(rules, keys, item, now):
+    """Seconds until this key may be used again (0 when ready). The primary also honours the older shared backoff."""
+    until = (rules.get("backoff") or {}).get(item["id"], 0)
+    if keys and item["id"] == keys[0]["id"]:
+        until = max(until, rules.get("retry_at", 0))
+    return max(0, until - now)
+
+
 def status(provider):
     rules = policy(provider)
-    with store.connect() as db:
-        minute = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, time.time()-60)).fetchone()[0]
-        day = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, time.time()-86400)).fetchone()[0]
     # An unusable master key is reported to the operator, never turned into a failing settings page.
     try:
-        configured, error, storage = bool(vault.get(provider)), None, vault.mode()
+        keys, error, storage = _keys(provider, rules), None, vault.mode()
     except HTTPException as exc:
-        configured, error, storage = False, exc.detail, "unavailable"
+        keys, error, storage = [], exc.detail, "unavailable"
+    now = time.time()
+    with store.connect() as db:
+        # Per key: no key material, not even a fragment, ever leaves the server.
+        summary = [{"slot": index, "primary": index == 1, "wait_seconds": round(_wait(rules, keys, item, now)),
+                    "usage": {"minute": _usage(db, _usage_name(provider, item["id"]), now - 60),
+                              "day": _usage(db, _usage_name(provider, item["id"]), now - 86400)}}
+                   for index, item in enumerate(keys, 1)]
+    configured = bool(keys)
     return {"provider": provider, "configured": configured, "enabled": bool(configured and rules["enabled"] and rules["business_authorized"]), "policy": rules,
-            "storage": storage, "credential_error": error, "usage": {"minute": minute, "day": day},
+            "storage": storage, "credential_error": error, "keys": summary, "max_keys": vault.MAX_KEYS,
+            "usage": {"minute": sum(item["usage"]["minute"] for item in summary), "day": sum(item["usage"]["day"] for item in summary)},
             "connection": store.state_get("connection:" + provider, {"state": "untested"}),
             "capabilities": store.state_get("capabilities:" + provider, {"verified": False})}
 
@@ -90,11 +120,15 @@ def configure(provider, payload):
                 if type(value) is not int or not 1 <= value <= maximum:
                     raise HTTPException(400, f"Invalid {name} budget")
                 rules[name] = value
-        key = payload.get("api_key")
-        if key is not None and (not isinstance(key, str) or key and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", key)):
-            raise HTTPException(400, "Invalid API key format")
-        key_changed = key is not None
-        if key_changed and not key:
+        keys = _keys(provider, rules)
+        new_keys = _edited_keys(keys, payload)
+        before_primary = keys[0]["id"] if keys else None
+        after_primary = (new_keys[0]["id"] if new_keys else None) if new_keys is not None else before_primary
+        keys_changed = new_keys is not None and [item["id"] for item in new_keys] != [item["id"] for item in keys]
+        # Uploads and their polling use the primary key, so only a new primary is a new account. Extra keys can be
+        # added or removed without invalidating approvals, in-flight submissions or cached reports.
+        key_changed = after_primary != before_primary
+        if new_keys is not None and not new_keys:
             rules["enabled"] = False
         # Budget-only edits keep staged samples, in-flight work and cached reports; credential or
         # permission changes invalidate approvals and in-flight results via a new generation.
@@ -105,10 +139,14 @@ def configure(provider, payload):
             rules["generation"] = secrets.token_hex(12)
         if key_changed:
             # A new account: its own backoff, and analyses of the previous account are not polled with it.
-            rules.update(retry_at=0, key_generation=secrets.token_hex(12))
-            vault.put(provider, key)
+            rules.update(retry_at=0, key_generation=after_primary or secrets.token_hex(12))
             store.state_set("capabilities:" + provider, {"verified": False})
             store.state_set("connection:" + provider, {"state": "untested"})
+        if keys_changed:
+            vault.put_all(provider, new_keys)
+            kept = {item["id"] for item in new_keys}
+            rules["backoff"] = {slot: until for slot, until in (rules.get("backoff") or {}).items()
+                                if slot in kept and not (key_changed and slot == after_primary)}
         store.state_set("provider:" + provider, rules)
         if key_changed:
             with store.connect() as db:
@@ -119,9 +157,56 @@ def configure(provider, payload):
     return status(provider)
 
 
-def _reserve(provider, expect=None):
-    """Return the key to use. `expect` binds the call to an approval: the configuration generation it was
-    granted under, and whether upload permission is required. Key and generation are read atomically."""
+def _edited_keys(keys, payload):
+    """The provider's keys after this settings edit, or None when the edit leaves them alone. A key that is already
+    saved keeps its id, so entering the primary key again is not a new account."""
+    ids = {item["key"]: item["id"] for item in keys}
+
+    def entry(value):
+        if not isinstance(value, str) or not KEY_PATTERN.fullmatch(value):
+            raise HTTPException(400, "Invalid API key format")
+        return {"id": ids.get(value) or secrets.token_hex(12), "key": value}
+
+    result = None
+    if payload.get("api_key") is not None:  # replace every key with this one ("" deletes them all)
+        if not isinstance(payload["api_key"], str):
+            raise HTTPException(400, "Invalid API key format")
+        result = [entry(payload["api_key"])] if payload["api_key"] else []
+    if "api_keys" in payload:
+        values = payload["api_keys"]
+        if not isinstance(values, list) or len(values) > vault.MAX_KEYS:
+            raise HTTPException(400, f"api_keys must be a list of at most {vault.MAX_KEYS} keys")
+        result = [entry(value) for value in values]
+    if payload.get("add_api_key") is not None:
+        current = list(keys if result is None else result)
+        added = entry(payload["add_api_key"])
+        if any(item["key"] == added["key"] for item in current):
+            raise HTTPException(400, "This key is already saved")
+        if len(current) >= vault.MAX_KEYS:
+            raise HTTPException(400, f"At most {vault.MAX_KEYS} keys per provider")
+        result = current + [added]
+    if "remove_key" in payload:
+        current = list(keys if result is None else result)
+        slot = payload["remove_key"]
+        if type(slot) is not int or not 1 <= slot <= len(current):
+            raise HTTPException(400, "remove_key must be the number of a saved key")
+        result = current[:slot - 1] + current[slot:]
+    if result is not None and len({item["key"] for item in result}) != len(result):
+        raise HTTPException(400, "The same key is listed twice")
+    return result
+
+
+def _bound(expect):
+    """A call tied to an approval or to a submission's account uses only the primary key."""
+    return bool(expect) and ("key_generation" in expect or bool(expect.get("upload")))
+
+
+def _reserve(provider, expect=None, tried=frozenset()):
+    """Return (key, key generation, key id) for one request. `expect` binds the call to an approval: the
+    configuration generation it was granted under, and whether upload permission is required. Such calls, and polls
+    bound to a key generation, use only the primary key: the account the approval was given for. Other calls take
+    the first key, in order, that is neither backing off nor over its own budget, skipping `tried` (keys that just
+    failed in this request). Keys and generation are read atomically."""
     with _lock:
         rules = policy(provider)
         if not rules["enabled"] or not rules.get("business_authorized"):
@@ -129,24 +214,67 @@ def _reserve(provider, expect=None):
         expect = expect or {}
         if any(name in expect and rules.get(name) != expect[name] for name in ("generation", "key_generation")) or (expect.get("upload") and not rules.get("upload_authorized")):
             raise HTTPException(409, "Provider configuration changed after approval; approval must be renewed")
-        key, key_generation = vault.get(provider), rules.get("key_generation")
-    if not key:
+        keys, key_generation = _keys(provider, rules), rules.get("key_generation")
+    if not keys:
         raise HTTPException(409, "Provider API key is not configured")
+    bound = _bound(expect)
+    candidates = keys[:1] if bound else [item for item in keys if item["id"] not in tried]
     now = time.time()
-    if rules.get("retry_at", 0) > now:
-        raise HTTPException(429, "Provider backoff is active", headers={"Retry-After": str(int(rules["retry_at"] - now) + 1)})
+    ready = [item for item in candidates if not _wait(rules, keys, item, now)]
+    if not ready:
+        waits = [_wait(rules, keys, item, now) for item in keys[:1] if bound] or [_wait(rules, keys, item, now) for item in keys]
+        raise HTTPException(429, "Provider backoff is active" + ("" if bound or len(keys) == 1 else " for every saved key"),
+                            headers={"Retry-After": str(int(min(waits)) + 1)})
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        minute = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, now - 60)).fetchone()[0]
-        day = db.execute("SELECT COUNT(*) FROM intelligence_usage WHERE provider=? AND stamp>?", (provider, now - 86400)).fetchone()[0]
-        if minute >= rules["per_minute"] or day >= rules["per_day"]:
-            raise HTTPException(429, "Shared provider request budget reached", headers={"Retry-After": "60" if day < rules["per_day"] else "3600"})
-        db.execute("INSERT INTO intelligence_usage VALUES (?,?)", (provider, now))
-    return key, key_generation
+        day_limited = True
+        for item in ready:
+            name = _usage_name(provider, item["id"])
+            minute, day = _usage(db, name, now - 60), _usage(db, name, now - 86400)
+            if minute < rules["per_minute"] and day < rules["per_day"]:
+                db.execute("INSERT INTO intelligence_usage VALUES (?,?)", (name, now))
+                return item["key"], key_generation, item["id"]
+            day_limited = day_limited and day >= rules["per_day"]
+    raise HTTPException(429, "Request budget reached" + ("" if len(ready) == 1 else " for every saved key"),
+                        headers={"Retry-After": "3600" if day_limited else "60"})
+
+
+def _back_off(provider, slot, seconds):
+    with _lock:  # Fresh read: only the backoff changes, never a concurrent settings edit.
+        rules = policy(provider)
+        if any(item["id"] == slot for item in _keys(provider, rules)):  # A late 429 for a removed key is not another key's.
+            rules["backoff"] = {**(rules.get("backoff") or {}), slot: time.time() + seconds}
+            store.state_set("provider:" + provider, rules)
+
+
+class _NextKey(Exception):
+    """This key failed (rate limited or invalid); `error` is what the caller gets when no other key is ready."""
+
+    def __init__(self, error):
+        super().__init__(error.detail)
+        self.error = error
 
 
 def request(provider, method, path, expect=None, **kwargs):
-    key, key_generation = _reserve(provider, expect)
+    """One provider call. A key that hits the provider's rate limit (429) or is rejected as invalid (401) backs off,
+    and the call moves on to the next saved key, unless it is bound to the primary key. With no other key ready,
+    the caller gets that key's own error."""
+    tried, failure = set(), None
+    while True:
+        try:
+            key, _key_generation, slot = _reserve(provider, expect, frozenset(tried))
+        except HTTPException as error:
+            if failure is not None and error.status_code == 429:
+                raise failure.error from None
+            raise
+        tried.add(slot)
+        try:
+            return _send(provider, method, path, key, slot, not _bound(expect), kwargs)
+        except _NextKey as next_key:
+            failure = next_key
+
+
+def _send(provider, method, path, key, slot, rotate, kwargs):
     headers = {"x-apikey": key} if provider == "virustotal" else {"api-key": key, "User-Agent": "Falcon Sandbox"}
     try:
         with httpx.Client(timeout=40, follow_redirects=False, trust_env=False) as client:
@@ -159,16 +287,19 @@ def request(provider, method, path, expect=None, **kwargs):
                 seconds = max(1, min(86400, int(delay)))
             except ValueError:
                 seconds = 60
-            with _lock:  # Fresh read: only the backoff changes, never a concurrent settings edit.
-                rules = policy(provider)
-                if rules.get("key_generation") == key_generation:  # A late 429 for a replaced key is not the new key's.
-                    rules["retry_at"] = time.time() + seconds
-                    store.state_set("provider:" + provider, rules)
+            _back_off(provider, slot, seconds)
             store.state_set("connection:" + provider, {**store.state_get("connection:" + provider, {}), "state": "rate_limited", "checked_at": time.time()})
-            raise HTTPException(429, "Provider rate limit reached", headers={"Retry-After": str(seconds)})
+            error = HTTPException(429, "Provider rate limit reached", headers={"Retry-After": str(seconds)})
+            if rotate:
+                raise _NextKey(error)
+            raise error
         if response.status_code in (401, 403):
             store.state_set("connection:" + provider, {**store.state_get("connection:" + provider, {}), "state": "restricted", "checked_at": time.time(), "http_status": response.status_code})
-            raise HTTPException(response.status_code, "Provider rejected the key or this account lacks the requested capability")
+            error = HTTPException(response.status_code, "Provider rejected the key or this account lacks the requested capability")
+            if response.status_code == 401 and rotate:
+                _back_off(provider, slot, 3600)  # an invalid key: use the others, and try this one again in an hour
+                raise _NextKey(error)
+            raise error
         if not 200 <= response.status_code < 300:
             store.state_set("connection:" + provider, {**store.state_get("connection:" + provider, {}), "state": "unavailable", "checked_at": time.time()})
             raise HTTPException(502, "Provider failed or attempted a redirect")
