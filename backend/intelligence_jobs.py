@@ -31,7 +31,7 @@ def _enqueue(db, provider, sha, operation, body, now):
 
 
 def enqueue(provider, sha, operation="lookup", body=None):
-    intel.policy(provider)
+    intel.reputation_provider(provider)
     if operation == "lookup":
         sha = intel.valid_hash(sha)
     with store.connect() as db:

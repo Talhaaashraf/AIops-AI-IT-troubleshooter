@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 import zipfile
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -1103,6 +1104,12 @@ def threat_explain(device_id: str, payload: dict):
     if not result["summary"]:
         result = {**threat_rules.rules_explanation(analysis), "source": "rules", "note": "The AI gave no usable answer"}
     _record_ai("threat_analysis", target.device_id, think, {"summary": result["summary"], "priorities": result["priorities"], "steps": result["next_steps"]})
+    if result.get("source") == "ai":
+        # Optional Gemini check of the local analysis (masked names; advice only, never an action).
+        from . import ai_verifier
+        evidence = [{key: item.get(key) for key in ("id", "title", "severity", "status", "source", "path", "detail")} for item in analysis["findings"][:40]]
+        result["second_opinion"] = ai_verifier.verify("threat_analysis", "Which security findings matter most on this device, and why?", evidence,
+                                                      {"summary": result["summary"], "priorities": result["priorities"]}, (target.label, target.device_id), "security")
     return result
 
 
@@ -1879,6 +1886,18 @@ async def _apply_approved_fix(session_id, index, device_id):
         fixes_starting.discard(device_id)
 
 
+@app.post("/api/troubleshoot/{session_id}/recheck")
+async def troubleshoot_recheck(session_id: str):
+    """Run the finished diagnosis's read-only checks again and compare the findings. Changes nothing on the device."""
+    from .agent_brain.planner import recheck
+    try:
+        return await recheck(session_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 @app.post("/api/troubleshoot/{session_id}/solutions/{index}/decision")
 async def troubleshoot_solution_decision(session_id: str, index: int, payload: dict):
     """A person marks a suggested solution as done by hand, or rejects it (recorded, never executed)."""
@@ -1987,17 +2006,39 @@ INSTALL_SCRIPTS = {
 BINARY_BUILDS = {"windows": ("windows", "DeviceHealthAgent.exe"), "linux": ("linux", "DeviceHealthAgent"), "mac": ("macos", "DeviceHealthAgent")}
 
 
+def _lan_url(request):
+    """The server's detected LAN address. In Docker nginx answers on port 80; run directly, the app's own port."""
+    port = None if Path("/.dockerenv").exists() else getattr(getattr(request, "url", None), "port", None)
+    return public_url.lan_url(port)
+
+
+def _configured_url(request):
+    """SENTINEL_PUBLIC_URL as set; "auto" means the detected LAN address (follows a DHCP change by itself)."""
+    value = os.getenv("SENTINEL_PUBLIC_URL", "").strip()
+    return (_lan_url(request) or "") if value.lower() == "auto" else value
+
+
 def _server_url(request, override=None):
-    """Address agents should use: an explicit override, then the configured SENTINEL_PUBLIC_URL (stable),
-    then the live ngrok URL (free URLs change when ngrok restarts, which strands installed agents), then
-    the address the browser used."""
-    for candidate in (override, os.getenv("SENTINEL_PUBLIC_URL", ""), public_url.ngrok_url()):
-        candidate = (candidate or "").strip().rstrip("/")
+    """Address agents should use: an explicit override, then the configured SENTINEL_PUBLIC_URL (stable, or
+    "auto" for the detected LAN IP), then the live ngrok URL (free URLs change when ngrok restarts, which strands
+    installed agents), then the detected LAN IP, then the address the browser used."""
+    sources = (lambda: override, lambda: _configured_url(request), public_url.ngrok_url, lambda: _lan_url(request))
+    for source in sources:  # in order, and only as far as needed
+        candidate = (source() or "").strip().rstrip("/")
         if candidate:
             if not SERVER_URL_PATTERN.fullmatch(candidate):
                 raise HTTPException(status_code=400, detail="Invalid server URL")
             return candidate
     return str(request.base_url).rstrip("/")
+
+
+def _stale_lan_note(configured, lan):
+    """SENTINEL_PUBLIC_URL names a LAN IP the server no longer has (DHCP gave it a new one): agents can't connect."""
+    host = urlparse(configured).hostname or ""
+    if lan and public_url._usable(host) and host != urlparse(lan).hostname:
+        return (f"SENTINEL_PUBLIC_URL points at {host}, but this server's LAN IP is now {urlparse(lan).hostname}. "
+                "Devices can't reach the old address. Use the detected one, or set SENTINEL_PUBLIC_URL=auto in .env.")
+    return None
 
 
 def open_enrollment():
@@ -2010,8 +2051,10 @@ def open_enrollment():
 @app.get("/api/agents/enrollment")
 def enrollment_info(request: Request):
     ngrok = public_url.ngrok_url()
+    lan = _lan_url(request)
     return {"open": open_enrollment(), "server_url": _server_url(request), "ngrok_url": ngrok,
-            "ngrok_note": "Use it for devices outside this network. Free ngrok URLs change when ngrok restarts, so devices installed with it must re-run the install command after a change." if ngrok else None}
+            "ngrok_note": "Use it for devices outside this network. Free ngrok URLs change when ngrok restarts, so devices installed with it must re-run the install command after a change." if ngrok else None,
+            "lan_url": lan, "lan_note": _stale_lan_note(_configured_url(request), lan)}
 
 
 def _require_install_token(token):
@@ -2084,7 +2127,8 @@ def troubleshoot_feedback(session_id: str, payload: dict):
 
 @app.get("/api/learning/stats")
 def learning_stats():
-    return {**learning_store.stats(), "model": model_builder.version_info(), "rebuild_every": model_builder.rebuild_every(), "learned_model_name": model_builder.learned_model_name(), "base_model": model_builder.base_model_name()}
+    from . import ai_verifier
+    return {**learning_store.stats(), "second_opinion": ai_verifier.agreement_stats(), "model": model_builder.version_info(), "rebuild_every": model_builder.rebuild_every(), "learned_model_name": model_builder.learned_model_name(), "base_model": model_builder.base_model_name()}
 
 
 @app.get("/api/learning/cases")

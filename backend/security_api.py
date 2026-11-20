@@ -70,7 +70,7 @@ async def prepare_sample(device: str, payload: dict, request: Request):
     from .agent_brain.executor import execute
     selected = target(device)
     analysis, finding = _current_finding(selected, payload.get("finding_id"))
-    provider, sha = str(payload.get("provider")), intelligence.valid_hash(payload.get("sha256"))
+    provider, sha = intelligence.reputation_provider(str(payload.get("provider"))), intelligence.valid_hash(payload.get("sha256"))
     if selected.is_local or selected.status != "online" or not finding.get("path") or not finding.get("item_id"):
         raise HTTPException(409, "Select an online agent finding with a transferable file")
     if not intelligence.allowed(provider):

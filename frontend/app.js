@@ -1233,6 +1233,16 @@ function renderChatProgress(element, turn) {
   $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
 }
 
+// Gemini's second opinion on a local AI answer (shown only when it is enabled in Threat Intelligence settings).
+function secondOpinionHtml(op) {
+  if (!op) return '';
+  if (op.state !== 'done') return `<p class="second-opinion unavailable soft-label">${escapeHtml(op.reason || 'Second opinion unavailable.')}</p>`;
+  const label = { agree: 'Gemini agrees', partly: 'Gemini partly agrees', disagree: 'Gemini disagrees' }[op.verdict] || 'Gemini';
+  const concerns = (op.concerns || []).length ? `<ul>${op.concerns.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '';
+  return `<div class="second-opinion ${escapeHtml(op.verdict)}"><strong>${label}</strong> <span class="soft-label">${escapeHtml(op.model || '')} · confidence ${Math.round((Number(op.confidence) || 0) * 100)}%</span>
+    <p>${escapeHtml(op.reason)}</p>${concerns}<small class="soft-label">${escapeHtml(op.note || 'Second opinion only.')}</small></div>`;
+}
+
 function renderChatTurnExtras(element, turn) {
   const meta = document.createElement('p');
   meta.className = 'soft-label';
@@ -1245,6 +1255,7 @@ function renderChatTurnExtras(element, turn) {
     details.append(summary, chatStepsList(turn.steps));
     element.appendChild(details);
   }
+  element.insertAdjacentHTML('beforeend', secondOpinionHtml(turn.second_opinion));
   if (turn.proposal) element.appendChild(chatProposalCard(turn));
 }
 
@@ -2368,6 +2379,13 @@ async function loadAddAgent() {
       $('enroll-ngrok-note').innerHTML = `Public address (ngrok): <code>${escapeHtml(info.ngrok_url)}</code> <button class="ghost-button" type="button" id="use-ngrok-url">Use it</button><br>${escapeHtml(info.ngrok_note || '')}`;
       $('use-ngrok-url').addEventListener('click', () => { $('enroll-server').value = info.ngrok_url; updateInstallInstructions(); });
     }
+    // The server's own LAN IP, detected automatically, plus a warning when the configured one is stale.
+    $('enroll-lan-note').classList.toggle('hidden', !info.lan_url);
+    if (info.lan_url) {
+      $('enroll-lan-note').innerHTML = `This server's LAN address (detected): <code>${escapeHtml(info.lan_url)}</code> <button class="ghost-button" type="button" id="use-lan-url">Use it</button>`
+        + (info.lan_note ? `<br><strong>${escapeHtml(info.lan_note)}</strong>` : '');
+      $('use-lan-url').addEventListener('click', () => { $('enroll-server').value = info.lan_url; updateInstallInstructions(); });
+    }
   } catch (_error) {
     defaultEnrollServer = defaultEnrollServer || location.origin;
   }
@@ -2836,6 +2854,7 @@ function renderTroubleshootSession(session) {
       <strong>${escapeHtml(report.root_cause)}</strong>
       ${report.remaining_uncertainty ? `<p class="ts-uncertainty soft-label">Remaining uncertainty: ${escapeHtml(report.remaining_uncertainty)}</p>` : ''}
     </div>
+    ${secondOpinionHtml(report.second_opinion)}
     ${renderEscalation(report)}
     ${renderFleet(report)}
     ${evidence ? `<small class="ts-label">EVIDENCE</small><ul class="ts-list">${evidence}</ul>` : ''}
@@ -2847,8 +2866,41 @@ function renderTroubleshootSession(session) {
     ${renderSolutions(report, session)}
     ${reasoning}
     ${renderSimilarCases(report.similar_cases)}
+    ${renderRecheck(report, session)}
     ${TERMINAL_STATUSES.includes(session.status) ? renderFeedback(session) : ''}
   `;
+}
+
+// Recheck: after a finished diagnosis, run its read-only checks again and compare (no AI, no change).
+function renderRecheck(report, session) {
+  if (!['diagnosed', 'resolved', 'unresolved'].includes(session.status) && !report.recheck) return '';
+  const result = report.recheck;
+  const tone = !result ? '' : result.cause === 'cleared' ? 'ok' : result.cause === 'still_detected' ? 'failed' : '';
+  const list = (label, items) => (items || []).length ? `<p><strong>${label}:</strong> ${items.map(escapeHtml).join('; ')}</p>` : '';
+  const busy = !TERMINAL_STATUSES.includes(session.status);
+  return `<div class="ts-verify ts-recheck ${tone}">
+    <small>RECHECK · READ-ONLY, NOTHING IS CHANGED</small>
+    ${result ? `<strong>${escapeHtml(result.summary)}</strong>
+      ${list('Cleared', result.cleared)}${list('Still detected', result.remaining)}${list('New', result.new)}
+      <p class="soft-label">${result.checks.length} check(s) run again · ${escapeHtml(new Date(result.at).toLocaleString())}</p>`
+      : '<p>Fixed something by hand, or want to see if the problem came back? Run the same checks again and compare.</p>'}
+    <div class="button-row"><button type="button" class="ghost-button" data-recheck ${busy ? 'disabled' : ''}>${result ? 'Recheck again' : 'Recheck'}</button></div>
+  </div>`;
+}
+
+async function recheckTroubleshoot(button) {
+  button.disabled = true;
+  button.textContent = 'Rechecking...';
+  try {
+    const response = await fetch(`/api/troubleshoot/${tsSessionId}/recheck`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Recheck failed');
+    toast(data.summary);
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  } finally {
+    refreshTroubleshootSession();
+  }
 }
 
 function renderSimilarCases(cases) {
@@ -2919,6 +2971,7 @@ async function loadLearning() {
       ? `${stats.learned_model_name} on ${model.base_model} · ${model.lessons} lessons · ${new Date(model.built_at).toLocaleString()}${model.created_in_ollama ? '' : ' · not loaded in Ollama'}`
       : `Builds automatically every ${stats.rebuild_every} trusted cases`);
 
+    renderAgreement(stats.second_opinion);
     $('learn-lessons').innerHTML = (lessons.lessons || []).map((line) => `<li>${escapeHtml(line.replace(/^- /, ''))}</li>`).join('')
       || '<li class="soft-label">No lessons yet. Resolve a few issues and give feedback.</li>';
     $('learn-top-fixes').innerHTML = (stats.top_fixes || []).map((fix) => `<tr><td>${escapeHtml(toolLabel(fix.tool_id))}</td><td>${fix.resolved} / ${fix.attempts}</td><td>${Math.round(fix.rate * 100)}%</td></tr>`).join('')
@@ -2934,6 +2987,25 @@ async function loadLearning() {
   } catch (error) {
     setText('learn-status', error.message);
   }
+}
+
+const SPECIALIST_NAMES = { hardware: 'Hardware', os: 'Operating system', network: 'Network', general: 'General technician', security: 'Security (threats and files)' };
+
+function renderAgreement(data) {
+  // How often the local AI and Gemini agree, per specialist: shows where the local model is weakest.
+  if (!data) return;
+  const overall = data.overall || {};
+  const score = (rate) => (rate === null || rate === undefined ? '--' : `${Math.round(rate * 100)}%`);
+  setText('learn-agree-rate', score(overall.agreement_rate));
+  const parts = [];
+  if (!data.enabled) parts.push('Gemini second opinion is off (turn it on in Threat Intelligence Settings).');
+  parts.push(`${overall.judged || 0} answers checked${overall.unavailable ? `, ${overall.unavailable} not checked (Gemini unavailable or over budget)` : ''}.`);
+  if (data.weakest) parts.push(`Weakest area: ${SPECIALIST_NAMES[data.weakest] || data.weakest}.`);
+  parts.push(data.note || '');
+  setText('learn-agree-summary', parts.join(' '));
+  $('learn-agree').innerHTML = (data.by_specialist || []).filter((row) => row.judged).map((row) => `
+    <tr${row.id === data.weakest ? ' class="weakest-row"' : ''}><td>${escapeHtml(SPECIALIST_NAMES[row.id] || row.id)}</td><td>${row.agree}</td><td>${row.partly}</td><td>${row.disagree}</td><td>${score(row.agreement_rate)}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="empty-state">No second opinions yet.</td></tr>';
 }
 
 async function rebuildLearnedModel() {
@@ -3349,7 +3421,8 @@ async function explainThreats() {
     box.innerHTML = `<p class="kicker">${data.source === 'ai' ? 'AI analysis' : 'Rules summary (AI off)'}${data.note ? ` · ${escapeHtml(data.note)}` : ''}</p>
       <p>${escapeHtml(data.summary)}</p>
       ${data.priorities.length ? `<ol>${data.priorities.map((item) => `<li><a href="#threat-${escapeHtml(item.finding_id)}" data-threat-jump="${escapeHtml(item.finding_id)}">${escapeHtml(item.finding_id)}</a>: ${escapeHtml(item.why)}</li>`).join('')}</ol>` : ''}
-      ${data.next_steps.length ? `<p class="kicker">Next steps</p><ul>${data.next_steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ul>` : ''}`;
+      ${data.next_steps.length ? `<p class="kicker">Next steps</p><ul>${data.next_steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ul>` : ''}
+      ${secondOpinionHtml(data.second_opinion)}`;
   } catch (error) {
     box.innerHTML = `<p class="soft-label">${escapeHtml(friendlyError(error))}</p>`;
   }
@@ -3622,6 +3695,8 @@ function wireEvents() {
     if (button) applyTroubleshootFix(Number(button.dataset.applyFix));
     const decision = event.target.closest('[data-solution-decision]');
     if (decision) decideSolution(Number(decision.dataset.solutionIndex), decision.dataset.solutionDecision);
+    const recheckButton = event.target.closest('[data-recheck]');
+    if (recheckButton) recheckTroubleshoot(recheckButton);
     const feedback = event.target.closest('[data-feedback]');
     if (feedback) sendFeedback(feedback.dataset.feedback === 'down-submit' ? 'down-submit' : feedback.dataset.feedback);
   });

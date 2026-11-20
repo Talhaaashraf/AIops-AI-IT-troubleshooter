@@ -279,6 +279,23 @@ Ask Technician becomes **AI Chat**: the user describes a problem in plain words,
 - [~] No Remember session option (removed on request): sign-in always lasts 30 days, as before. Test in `tests/test_chat_agent.py`
 - Not checked: the look in a real browser (no browser on the laptop)
 
+## Phase 16: Second opinion with Gemini, and a file-verdict cross-check (2026-11-20)
+
+- [~] `backend/ai_verifier.py`: Gemini judges a local AI answer against the same evidence (agree / partly / disagree, confidence, reason, concerns). Off until enabled in Threat Intelligence settings (key, recorded permission, budget, model id; default `gemini-3.8-flash`). It reuses the multi-key vault, per-key budgets and 429/401 rotation (`intelligence.VERIFIERS`). Model ids are validated, so the request path cannot be steered. It never receives files and is refused as a file-reputation provider (lookups, uploads, transfers return 404)
+- [~] Masking before sending: device name and id, Windows/Linux user folders, IP and MAC addresses, e-mail addresses. The answer being judged is sent whole; only the evidence is trimmed to fit
+- [~] Wired into: diagnoses (`planner._second_opinion`, after the report is shown, AI reports only, recorded as decision kind `second_opinion`), AI Chat turns, threat analysis (`/api/threats/{id}/explain`) and hash explanations. A badge only: it never gates, runs or approves a fix, and a Gemini failure leaves the local answer untouched
+- [~] Hash explanation: the local AI now gives its own verdict, compared with VirusTotal / Hybrid Analysis (`match`, `mismatch`, `no_evidence`; provider "unknown" is never proof of clean). UI shows MISMATCH in red
+- [~] Agreement score (2026-11-20): every second opinion stores one label row (`second_opinions`: kind, specialist, verdict, model; kept a year). `ai_verifier.agreement_stats()` (agree = 1, partly = 0.5) overall, per specialist and per kind, with the weakest specialist (3+ judged answers); in `/api/learning/stats` and the Learning tab's "Local AI vs Gemini" panel. Gemini verdicts never feed learning or training
+- [~] Budget defaults 5/minute and 20/day (Gemini 3.8 Flash free tier, as reported by developers; check AI Studio). On the free tier only about 20 answers a day get a second opinion
+- [~] UI: Gemini settings card (model id, no file-submission option), shared `secondOpinionHtml` badge; asset versions bumped to `20261120`
+- Local validation: 13 new tests (`tests/test_ai_verifier.py`), full suite 428 passed. Not checked: a real Gemini key, the model with a real call (`gemini-3.8-flash`, GA per Google docs checked 2026-11-20; still editable in settings), the browser render, the server
+
+## Phase 17: Recheck button after a diagnosis (2026-11-20)
+
+- [~] `planner.recheck` / `compare_recheck` and `POST /api/troubleshoot/{id}/recheck`: re-runs the diagnosis's read-only checks (deduplicated, no benchmark, at most 6) as verify steps and compares findings with the diagnosis. Only findings whose check ran again are compared; a failed check is "not confirmed", never "cleared". Reports the main cause as cleared / still detected / not rechecked, plus cleared, remaining and new findings. Refused while the session is busy or the device is offline. Recorded as decision kind `recheck`. The session outcome is left as it was, so learning still trusts only approved fixes with their own re-check
+- [~] UI: a Recheck panel under each finished diagnosis (button, then the result and "Recheck again"); asset versions `20261122`
+- Local validation: 5 new tests (`tests/test_recheck.py`), full suite 433 passed. Not checked: the browser render, a real device
+
 ## Alignment review (2026-11-04)
 
 - Reviewed the root task tracker, historical plans, reachable Git history, current backend paths, all 14 local decision JSON records, and local database/model metadata. The local database has no saved sessions, learned cases, tasks, or remediation audit rows; it does not establish the Ubuntu server's current state.

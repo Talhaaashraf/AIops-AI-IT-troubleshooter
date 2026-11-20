@@ -799,3 +799,15 @@ select.field-input { cursor: pointer; }
 /* Fleet-wide correlation note (I8). */
 .ts-fleet { margin: 10px 0; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
 .ts-fleet .ts-label { color: var(--accent, var(--muted)); }
+
+/* Gemini second opinion and the VirusTotal / Hybrid Analysis cross-check */
+.second-opinion { margin: 10px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border, rgba(148,163,184,.3)); border-left-width: 4px; }
+.second-opinion p { margin: 6px 0; }
+.second-opinion ul { margin: 4px 0 6px 18px; }
+.second-opinion.agree { border-left-color: #22c55e; }
+.second-opinion.partly { border-left-color: #f59e0b; }
+.second-opinion.disagree { border-left-color: #ef4444; }
+.second-opinion.unavailable { border: none; padding: 0; }
+.ti-agreement.match { color: #22c55e; }
+.ti-agreement.mismatch { color: #ef4444; font-weight: 600; }
+.weakest-row td { color: #f59e0b; font-weight: 600; }

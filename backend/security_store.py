@@ -73,6 +73,9 @@ def _create_schema(db):
     CREATE TABLE IF NOT EXISTS intelligence_audit (id TEXT PRIMARY KEY, stamp REAL, operation TEXT, body TEXT);
     CREATE TABLE IF NOT EXISTS intelligence_submissions (provider TEXT, hash TEXT, token TEXT, state TEXT,
       PRIMARY KEY(provider,hash));
+    CREATE TABLE IF NOT EXISTS second_opinions (id TEXT PRIMARY KEY, stamp REAL NOT NULL, kind TEXT, specialist TEXT,
+      verdict TEXT NOT NULL, model TEXT);
+    CREATE INDEX IF NOT EXISTS second_opinions_stamp ON second_opinions(stamp);
     """)
 
 

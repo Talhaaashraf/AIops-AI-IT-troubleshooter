@@ -34,7 +34,7 @@ from agent.toolkit import get_tool, list_tools, tool_schemas
 from agent.toolkit.registry import validate_args
 from agent.toolkit.remediation import PROTECTED_PROCESSES, RESTARTABLE_SERVICES
 
-from .. import decision_log, fleet_correlation
+from .. import ai_verifier, decision_log, fleet_correlation
 from ..alert_store import get_alerts
 from ..learning import model_builder
 from ..learning import store as learning_store
@@ -960,6 +960,33 @@ async def _diagnose(session, target, mode, preset_evidence=None):
     await asyncio.to_thread(_record_diagnosis, session, target, report, found)
     events.publish(session_id, {"type": "report", "report": report})
     _publish_status(session_id, "diagnosed", f"Diagnosis ready in {total:.0f}s")
+    await _second_opinion(session_id, target, issue, report, found, evidence, playbook)
+
+
+async def _second_opinion(session_id, target, issue, report, found, evidence, playbook):
+    """Optional: Gemini checks the local AI's diagnosis against the same evidence, after the diagnosis is already
+    shown. Off unless enabled in settings; its verdict is a badge only and never gates or runs a fix."""
+    if not report.get("ai") or not await asyncio.to_thread(ai_verifier.enabled):
+        return
+    _think(session_id, "Asking Gemini for a second opinion on this diagnosis (device names are masked).")
+    evidence_view = {"findings": findings.findings_block(found, playbook), "checks": evidence_digest(evidence)}
+    answer = {"root_cause": report.get("root_cause"), "confidence": report.get("confidence"), "evidence": report.get("evidence"),
+              "proposed_fixes": [fix.get("title") or fix.get("tool_id") for fix in report.get("proposed_fixes") or [] if isinstance(fix, dict)]}
+    try:
+        opinion = await asyncio.to_thread(ai_verifier.verify, "diagnosis", issue, evidence_view, answer, (target.label, target.device_id),
+                                          (report.get("specialist") or {}).get("id"))
+    except Exception:
+        logger.exception("Troubleshoot %s: second opinion failed", session_id)
+        return
+    if not opinion:
+        return
+    report["second_opinion"] = opinion
+    session_store.update_session(session_id, report=report)
+    await asyncio.to_thread(decision_log.record, "second_opinion", session_id, {
+        "device": target.label, "device_id": target.device_id, "question": issue[:500], "provider": opinion["provider"], "model": opinion["model"],
+        "state": opinion["state"], "verdict": opinion.get("verdict"), "summary": opinion.get("reason"), "approved_by": None,
+        "note": "Second opinion only; it never changes anything on a device."})
+    events.publish(session_id, {"type": "report", "report": report})
 
 
 RECENT_ALERT_SECONDS = 6 * 3600
@@ -1463,6 +1490,91 @@ async def decide_solution(session_id, index, decision, decided_by="operator"):
         "tool_id": solution.get("tool_id"), "approved_by": decided_by if decision == "done" else None, "decided_by": decided_by,
     })
     return solution
+
+
+RECHECK_MAX_CHECKS = 6
+BUSY_STATUSES = ("queued", "running", "fixing", "verifying")
+
+
+async def recheck(session_id, requested_by="operator"):
+    """Recheck after a finished diagnosis: run the diagnosis's read-only checks again and compare the findings
+    with the ones from the diagnosis. Rules only: no AI call and nothing changes on the device. Use it after
+    fixing something by hand, or to see whether a problem came back. The session's outcome is not changed: only
+    an approved fix and its own re-check decide "resolved" (that is what the learning trusts)."""
+    async with _lock(session_id):
+        session = session_store.get_session(session_id)
+        if not session:
+            raise LookupError("Session not found")
+        if session["status"] in BUSY_STATUSES:
+            raise ValueError("The agent is busy with this session; wait for it to finish")
+        report = session.get("report") or {}
+        if not report:
+            raise ValueError("There is no finished diagnosis to recheck")
+        target = resolve_target(session["device_id"])
+        if target is None:
+            raise ValueError("Device no longer exists")
+        if not target.is_local and target.status != "online":
+            raise ValueError(f"{target.label} is offline; a recheck needs the device online")
+        calls = []
+        for step in session.get("steps") or []:
+            call = (step.get("tool_id"), step.get("args") or {})
+            if step.get("kind") == "tool" and call[0] and call[0] != "performance_benchmark" and call not in calls:
+                calls.append(call)
+        calls = calls[:RECHECK_MAX_CHECKS]
+        if not calls:
+            raise ValueError("This diagnosis ran no checks that can be repeated")
+        previous = session["status"]
+        _publish_status(session_id, "verifying", f"Rechecking {target.label}: running {len(calls)} read-only checks again")
+        try:
+            evidence = await _run_parallel(session_id, target, calls, kind="verify")
+        except Exception:
+            _publish_status(session_id, previous, "Recheck failed; nothing was changed")
+            raise
+        result = compare_recheck(report, evidence, target.os_type)
+        result.update(requested_by=requested_by, at=session_store.utc_now())
+        report["recheck"] = result
+        session_store.update_session(session_id, status=previous, report=report)
+        await asyncio.to_thread(decision_log.record, "recheck", session_id, {
+            "device": target.label, "device_id": target.device_id, "question": session["issue"][:500], "checks": result["checks"],
+            "summary": result["summary"], "cause": result["cause"], "approved_by": None, "decided_by": requested_by,
+            "note": "Recheck: read-only checks run again; nothing was changed on the device."})
+        events.publish(session_id, {"type": "report", "report": report})
+        _publish_status(session_id, previous, result["summary"][:200])
+    return result
+
+
+def compare_recheck(report, evidence, os_type):
+    """Findings before (the diagnosis) vs now. Only findings whose check ran again are compared, and a failed or
+    missing check never counts as "cleared": no data is not proof the problem is gone."""
+    ran_ok = {tool_id for tool_id, _, result in evidence if result.get("ok")}
+    failed = sorted({tool_id for tool_id, _, result in evidence if not result.get("ok")})
+    before = {item["key"]: item for item in report.get("quick_findings") or [] if isinstance(item, dict) and item.get("key")}
+    after = {item["key"]: item for item in findings.analyze(evidence, os_type)}
+    compared = {key: item for key, item in before.items() if item.get("source") in ran_ok}
+    cleared = [item["title"] for key, item in compared.items() if key not in after]
+    remaining = [item["title"] for key, item in compared.items() if key in after]
+    new = [item["title"] for key, item in after.items() if key not in before]
+    cause_key = report.get("cause_finding")
+    if not cause_key or cause_key not in before:
+        cause = "none"
+    elif cause_key not in compared:
+        cause = "not_rechecked"
+    else:
+        cause = "still_detected" if cause_key in after else "cleared"
+    if cause == "cleared":
+        summary = f"The main cause is no longer detected: {before[cause_key]['title']}."
+    elif cause == "still_detected":
+        summary = f"The main cause is still detected: {before[cause_key]['title']}."
+    elif not before:
+        summary = "No problems were found in the diagnosis, and the checks were run again."
+    else:
+        summary = f"{len(cleared)} problem(s) cleared, {len(remaining)} still detected."
+    if new:
+        summary += f" New since the diagnosis: {'; '.join(new[:3])}."
+    if failed:
+        summary += f" Not confirmed, these checks failed: {', '.join(failed)}."
+    return {"checks": [tool_id for tool_id, _, _ in evidence], "failed_checks": failed, "cleared": cleared, "remaining": remaining,
+            "new": new, "cause": cause, "summary": summary, "method": "rules"}
 
 
 async def _verify(session, target, report, fix):

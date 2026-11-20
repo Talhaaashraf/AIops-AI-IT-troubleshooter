@@ -1,6 +1,8 @@
 // Provider requests go only to Sentinel. Keys never enter browser persistence.
 (() => {
   const providers = {virustotal: 'VirusTotal', hybrid_analysis: 'Hybrid Analysis'};
+  // Gemini is a second-opinion AI: it checks the local model's answers. Same key handling; it never gets files.
+  const cards = {...providers, gemini: 'Gemini (second opinion)'};
   const panel = document.createElement('section');
   panel.className = 'panel intelligence-panel';
   panel.id = 'threat-intelligence';
@@ -41,20 +43,23 @@
     try { await run(ctx); } catch (error) { if (current(ctx)) textResult(output, errorText(error)); }
     finally { button.disabled = false; }
   }
-  for (const [provider, label] of Object.entries(providers)) {
+  for (const [provider, label] of Object.entries(cards)) {
+    const verifier = provider === 'gemini';
     const card = document.createElement('form'); card.className = 'ti-provider-card'; card.id = `ti-config-${provider}`;
     card.innerHTML = `<h3>${label}</h3><label>API key<input id="ti-key-${provider}" class="field-input" type="password" autocomplete="off" maxlength="256" placeholder="Leave blank to keep the saved keys"></label><div class="button-row"><button type="button" class="ghost-button" data-show="${provider}">Show key</button><button type="button" class="ghost-button" data-add="${provider}">Add as extra key</button></div>
       <p class="soft-label">Up to 5 keys. When one key reaches its limit or is rejected, the next key is used. Uploads use key 1. A key typed here and saved with Save / update replaces all saved keys.</p><div id="ti-keys-${provider}" class="ti-keys"></div>
       <label><input id="ti-authorized-${provider}" type="checkbox"> Provider permission covers this business workflow</label><label>Permission or licence basis<input id="ti-basis-${provider}" class="field-input" maxlength="500" placeholder="Describe the licence or written provider permission"></label>
-      <label><input id="ti-enabled-${provider}" type="checkbox"> Enable external hash lookups</label><label><input id="ti-submit-${provider}" type="checkbox"> Provider permission also covers public file submission</label>
+      ${verifier ? `<p class="soft-label">Checks the local AI's diagnoses, chat answers and threat/file verdicts against the same evidence and shows Agree / Partly / Disagree. Device names, users, IP and MAC addresses are masked before sending. It never runs or approves anything.</p><label>Model id<input id="ti-model-${provider}" class="field-input" maxlength="64" placeholder="gemini-3.8-flash"></label>
+      <label><input id="ti-enabled-${provider}" type="checkbox"> Enable second-opinion checks</label>` : `<label><input id="ti-enabled-${provider}" type="checkbox"> Enable external hash lookups</label><label><input id="ti-submit-${provider}" type="checkbox"> Provider permission also covers public file submission</label>`}
       <div class="button-row"><label>Requests/minute per key<input id="ti-minute-${provider}" class="field-input" type="number" min="1" max="100"></label><label>Requests/day per key<input id="ti-day-${provider}" class="field-input" type="number" min="1" max="100000"></label></div>
       <div class="button-row"><button>Save / update</button><button type="button" data-test="${provider}" class="ghost-button">Test connection</button><button type="button" data-delete="${provider}" class="ghost-button">Delete all keys</button></div><p id="ti-status-${provider}" role="status">Loading configuration...</p>`;
     $('ti-settings').appendChild(card);
     card.onsubmit = (event) => { event.preventDefault(); action(card.querySelector('button:not([type="button"])'), async () => {
       const input = $(`ti-key-${provider}`);
       const payload = {business_authorized: $(`ti-authorized-${provider}`).checked, use_basis: $(`ti-basis-${provider}`).value,
-        enabled: $(`ti-enabled-${provider}`).checked, upload_authorized: $(`ti-submit-${provider}`).checked,
+        enabled: $(`ti-enabled-${provider}`).checked,
         per_minute: Number($(`ti-minute-${provider}`).value), per_day: Number($(`ti-day-${provider}`).value)};
+      if (verifier) payload.model = $(`ti-model-${provider}`).value.trim(); else payload.upload_authorized = $(`ti-submit-${provider}`).checked;
       if (input.value.trim()) payload.api_key = input.value.trim();
       try { renderSettings(await api(`/${provider}/settings`, post(payload))); }
       finally { input.value = ''; input.type = 'password'; card.querySelector('[data-show]').textContent = 'Show key'; }
@@ -69,14 +74,16 @@
     card.querySelector('[data-delete]').onclick = (event) => action(event.target, async () => { renderSettings(await api(`/${provider}/settings`, post({api_key: ''}))); }, `ti-status-${provider}`);
     card.querySelector('[data-test]').onclick = (event) => action(event.target, async () => {
       const job = await api(`/${provider}/test`, post({}));
-      textResult(`ti-status-${provider}`, 'Connection test queued. Hybrid Analysis environment discovery waits for the shared quota.');
+      textResult(`ti-status-${provider}`, verifier ? 'Testing Gemini...' : 'Connection test queued. Hybrid Analysis environment discovery waits for the shared quota.');
       poll(job, () => true, async (value) => { if (['completed', 'restricted', 'failed'].includes(value.state)) { await refreshSettings(provider); if (value.result.detail) paragraph($(`ti-status-${provider}`), value.result.detail); } });
     }, `ti-status-${provider}`);
   }
   function renderSettings(data) {
     const p = data.provider; settings[p] = data;
     $(`ti-authorized-${p}`).checked = data.policy.business_authorized; $(`ti-enabled-${p}`).checked = data.policy.enabled;
-    $(`ti-submit-${p}`).checked = data.policy.upload_authorized; $(`ti-basis-${p}`).value = data.policy.use_basis;
+    if ($(`ti-submit-${p}`)) $(`ti-submit-${p}`).checked = data.policy.upload_authorized;
+    if ($(`ti-model-${p}`)) $(`ti-model-${p}`).value = data.policy.model || '';
+    $(`ti-basis-${p}`).value = data.policy.use_basis;
     $(`ti-minute-${p}`).value = data.policy.per_minute; $(`ti-day-${p}`).value = data.policy.per_day;
     textResult(`ti-status-${p}`, `${data.configured ? `${(data.keys || []).length} key(s) configured` : 'No usable key'} · ${data.enabled ? 'Enabled' : 'Disabled'} · ${data.connection.state}. Storage: ${data.storage}. Requests: ${data.usage.minute}/${data.policy.per_minute} this minute; ${data.usage.day}/${data.policy.per_day} today. Last success: ${stamp(data.connection.last_success)}. ${data.credential_error || ''}`);
     renderKeys(p, data);
@@ -100,7 +107,7 @@
   }
   async function refreshSettings(provider) {
     if (provider) return renderSettings(await api(`/${provider}/settings`));
-    await Promise.all(Object.keys(providers).map(async (p) => { try { await refreshSettings(p); } catch (e) { textResult(`ti-status-${p}`, errorText(e)); } }));
+    await Promise.all(Object.keys(cards).map(async (p) => { try { await refreshSettings(p); } catch (e) { textResult(`ti-status-${p}`, errorText(e)); } }));
   }
   async function poll(initial, valid, render) {
     let job = initial;
@@ -155,6 +162,15 @@
     const result = await api(`/explain/${ctx.hash}`, post({}));
     if (!current(ctx)) return;
     textResult('ti-explanation', result.summary); for (const step of result.next_steps || []) paragraph($('ti-explanation'), step);
+    if (result.local_verdict) paragraph($('ti-explanation'), `Local AI verdict: ${result.local_verdict}`);
+    const agree = result.agreement;
+    if (agree) {
+      const line = agree.state === 'match' ? `Cross-check: the local AI verdict matches VirusTotal / Hybrid Analysis (${agree.providers.join(', ')}).`
+        : agree.state === 'mismatch' ? `MISMATCH: the local AI says "${agree.local}" but the providers report ${agree.providers.join(', ')}. Review this file by hand.`
+        : 'Cross-check: not enough provider evidence to confirm the local AI verdict.';
+      const p = document.createElement('p'); p.className = `ti-agreement ${agree.state}`; p.textContent = line; $('ti-explanation').appendChild(p);
+    }
+    $('ti-explanation').insertAdjacentHTML('beforeend', secondOpinionHtml(result.second_opinion));
     paragraph($('ti-explanation'), `Sources: ${(result.evidence_refs || []).join(', ') || 'Unavailable'}. Advice only; no endpoint action performed.`);
   }, 'ti-explanation');
   function renderSample(result, provider, ctx) {

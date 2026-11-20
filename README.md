@@ -42,7 +42,7 @@ Edit `.env`:
 
 - `DASHBOARD_PASSWORD` and `ADMIN_API_KEY`: two different long random values.
 - `OLLAMA_MODEL`: `qwen3:4b` (default for the CPU server); choose `qwen3:8b` only when enough memory is available and you have checked its accuracy and response time on your hardware.
-- `SENTINEL_PUBLIC_URL=http://<this PC's LAN IP>`: the address devices use to reach the server. Find the IP with `ipconfig`.
+- `SENTINEL_PUBLIC_URL=auto`: install commands use this server's LAN IP, detected by the `hostip` service (a DHCP change is followed). Or set a fixed `http://<LAN IP>`; Add Agent warns when that IP is no longer the server's.
 
 Then start everything:
 
@@ -132,6 +132,9 @@ Optional per-device limits in the agent's `agent_config.json`:
 
   Up to two diagnosis sessions run at once (`MAX_CONCURRENT_DIAGNOSES=2`); further sessions queue. Model generation remains one call at a time by default (`OLLAMA_MAX_PARALLEL=1`), so their diagnostic checks can overlap while AI calls wait their turn.
 - **Cloud option.** Set `LLM_PROVIDER=groq` and `GROQ_API_KEY` to use Groq instead of the local model.
+- **Second opinion (Gemini, optional, off by default).** Gemini checks the local AI's answers against the same evidence and shows **Gemini agrees / partly agrees / disagrees** with its reason. It covers diagnoses (added a few seconds after the report appears), AI Chat answers, threat analyses and file-reputation explanations. Turn it on in Threat Detection > Threat Intelligence Settings > **Gemini (second opinion)**: API key(s), the recorded permission, a budget and the model id (default `gemini-3.8-flash`; change it if Google retires it). Device names, users, IP and MAC addresses and e-mail addresses are masked before anything is sent. It never receives files, and its verdict is a badge only: it never runs, approves or blocks a fix.
+- **Agreement score.** The Learning tab shows how often the local AI and Gemini agreed over the last 30 days, per specialist (Hardware, OS, Network, General, Security), and names the weakest area. Only labels are stored (kind, specialist, verdict, model), never questions or answers. Agreement is a signal, not proof: Gemini's verdict never trains the local model; only fixes that worked count as correct. The Gemini budget defaults to 5 requests/minute and 20/day, the free tier's reported limits for Gemini 3.8 Flash, so not every answer is checked on the free tier.
+- **File verdict cross-check.** **Explain provider evidence with AI** now also gives the local AI's own verdict (malicious, suspicious, clean, unknown) and compares it with VirusTotal / Hybrid Analysis: **match**, **MISMATCH** (review the file by hand), or not enough evidence. A provider's "unknown" or zero detections never counts as proof that a file is clean.
 
 ## Security model
 
@@ -157,7 +160,7 @@ Optional per-device limits in the agent's `agent_config.json`:
 - **Updates.** OS and app updates install only after you tick them and confirm. AIops never restarts a computer; it tells you when a restart is needed.
 - **Threat Intelligence keys and samples.**
   - Provider keys are entered in the dashboard, never in chat. They are encrypted, never shown again, and never sent to agents.
-  - Each provider can hold up to 5 keys (**Add as extra key**). The budget (requests per minute and per day) applies to each key. A lookup uses the first key that is within its budget. A key that gets a rate limit (429) or is rejected (401) rests, and the request moves on to the next key. Uploads and their status checks always use key 1, the account the approval was given for. Adding or removing an extra key keeps approvals and cached reports; replacing key 1 counts as a new account.
+  - Each provider (VirusTotal, Hybrid Analysis, Gemini) can hold up to 5 keys (**Add as extra key**). The budget (requests per minute and per day) applies to each key. A lookup uses the first key that is within its budget. A key that gets a rate limit (429) or is rejected (401) rests, and the request moves on to the next key. Uploads and their status checks always use key 1, the account the approval was given for. Adding or removing an extra key keeps approvals and cached reports; replacing key 1 counts as a new account.
   - With `SENTINEL_INTELLIGENCE_MASTER_KEY` set, the encrypted keys are kept in the database and survive restarts. The deploy workflow creates this key once on the server. Never change it, or the saved keys become unreadable and must be entered again.
   - Only hashes are looked up automatically. A file is uploaded only after a single-use approval for that provider and that file, and the agent never opens a file the antivirus flagged in order to hash it.
 - **Records.**
@@ -195,11 +198,11 @@ Optional per-device limits in the agent's `agent_config.json`:
 | `AGENT_AI_TIMEOUT_SECONDS` | `300` | Longest one AI call may take. Past it the rule-based diagnosis is shown. Calls with thinking use `AGENT_AI_TIMEOUT_SECONDS_DEEP` (900). |
 | `ADMIN_API_KEY` | none | `X-Admin-Key` for `DELETE /api/agents/{id}`; also the login password when `DASHBOARD_PASSWORD` is empty |
 | `DASHBOARD_PASSWORD` | none | Turns on the dashboard login |
-| `SENTINEL_INTELLIGENCE_MASTER_KEY` | empty (the deploy workflow creates one on the server) | Encrypts saved VirusTotal / Hybrid Analysis keys; without it they live only in memory |
+| `SENTINEL_INTELLIGENCE_MASTER_KEY` | empty (the deploy workflow creates one on the server) | Encrypts saved VirusTotal / Hybrid Analysis / Gemini keys; without it they live only in memory |
 | `ONBOARDING_CHECK` | `true` | AI check-up the first time a device reports |
 | `THREAT_SCAN_MINUTES` | `60` | How often every online device gets a read-only threat scan; `0` means only on **Scan now** |
 | `OPEN_ENROLLMENT` | `true` | Install commands need no token; `false` asks for one-time tokens (use it with a public address) |
-| `SENTINEL_PUBLIC_URL` | browser URL | Server address written into install commands |
+| `SENTINEL_PUBLIC_URL` | ngrok URL, else detected LAN IP | Server address in install commands; `auto` = detected LAN IP |
 | `AIOPS_SERVER_HOSTNAME` | written by the deploy workflow | The host's name: its AIops agent is shown as "This server" instead of the container |
 | `AIOPS_SERVER_DEVICE_ID` | empty | Pins "This server" to one agent when several have the host's name |
 | `AI_WORKER_THREADS`, `DEFAULT_WORKER_THREADS` | `4`, `16` | Thread pools for AI work and for everything else, kept apart so a slow model never stalls the dashboard |
@@ -238,6 +241,7 @@ All routes need the dashboard login, except the agent and enrollment routes.
   - `GET /api/troubleshoot/{id}`
   - `POST /api/troubleshoot/{id}/fixes/{index}/apply`
   - `POST /api/troubleshoot/{id}/solutions/{index}/decision` `{decision: done|rejected}`
+  - `POST /api/troubleshoot/{id}/recheck`: after a finished diagnosis, run its read-only checks again (up to 6, no AI) and compare the findings: cause cleared / still detected, what cleared, what is new. A failed check is never counted as cleared. Nothing changes on the device, and the session's outcome is not changed (only an approved fix and its own re-check mark it resolved). The **Recheck** button sits under the diagnosis
   - WebSocket `/ws/troubleshoot/{id}`
   - `GET /api/troubleshoot/playbooks|specialists|targets|sessions|audit`
 - **Performance:**
@@ -259,7 +263,7 @@ All routes need the dashboard login, except the agent and enrollment routes.
   - `GET /api/learning/stats|cases|lessons`, `POST /api/learning/rebuild`
 - **Threats and Threat Intelligence:**
   - `GET /api/threats`, `GET /api/threats/{id}`, `POST /api/threats/{id}/scan|actions|proposal|marks|explain|chat`
-  - `GET|POST /api/threat-intelligence/{provider}/settings`, `POST /api/threat-intelligence/{provider}/test`, `GET /api/threat-intelligence/{provider}/files/{sha256}`
+  - `GET|POST /api/threat-intelligence/{provider}/settings`, `POST /api/threat-intelligence/{provider}/test` (provider: `virustotal`, `hybrid_analysis` or `gemini`), `GET /api/threat-intelligence/{provider}/files/{sha256}` (file providers only)
   - `POST /api/threat-intelligence/{provider}/check-file`, `POST|DELETE /api/threat-intelligence/{provider}/uploads/{token}`, `GET /api/threat-intelligence/{provider}/analyses/{token}`
   - `POST /api/security/investigations`, `GET /api/security/{id}/findings`, `POST /api/security/{id}/sample-transfer`
 - **Fleet:**

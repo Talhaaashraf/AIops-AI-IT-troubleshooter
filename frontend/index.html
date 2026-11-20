@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIops · AI IT Troubleshooter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b8cff'/%3E%3Cpath d='M16 6l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V9z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=20261119">
+  <link rel="stylesheet" href="/static/style.css?v=20261122">
   <script>
     try { const saved = localStorage.getItem('sentinel-theme'); if (saved) document.documentElement.dataset.theme = saved; } catch (_error) {}
   </script>
@@ -537,6 +537,16 @@
               </table>
             </div>
           </section>
+          <section class="panel">
+            <div class="section-heading"><div><p class="kicker">Second opinion · last 30 days</p><h2>Local AI vs Gemini</h2></div><strong id="learn-agree-rate">--</strong></div>
+            <p id="learn-agree-summary" class="soft-label">Gemini second opinion is off. Turn it on in Threat Detection &gt; Threat Intelligence Settings.</p>
+            <div class="table-wrap flat">
+              <table class="compact-table">
+                <thead><tr><th>Specialist</th><th>Agree</th><th>Partly</th><th>Disagree</th><th>Score</th></tr></thead>
+                <tbody id="learn-agree"><tr><td colspan="5" class="empty-state">No second opinions yet.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </div>
 
         <section class="panel">
@@ -643,6 +653,7 @@
             <input id="enroll-server" class="field-input" autocomplete="off" spellcheck="false">
             <p id="enroll-server-warning" class="enroll-warning hidden">This address only works on this computer. To add other devices, enter this machine's LAN IP, e.g. <code>http://192.168.1.20</code>. Installing the agent on this same laptop works as is.</p>
             <p id="enroll-ngrok-note" class="enroll-warning hidden"></p>
+            <p id="enroll-lan-note" class="enroll-warning hidden"></p>
           </section>
 
           <section id="enroll-token-step" class="panel enroll-step">
@@ -682,8 +693,8 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261119"></script>
+  <script src="/static/app.js?v=20261123"></script>
   <script src="/static/workbench.js?v=20261105"></script>
-  <script src="/static/threat_intelligence.js?v=20261119"></script>
+  <script src="/static/threat_intelligence.js?v=20261122"></script>
 </body>
 </html>

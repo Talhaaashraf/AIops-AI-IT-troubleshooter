@@ -92,10 +92,30 @@ services:
       - ./agent_builds:/app/agent_builds:ro
       # Every AI decision and every approval, as JSON + a daily index (see backend/decision_log.py).
       - ./decisions:/app/decisions
+      # The server's LAN IP, written by the hostip service (install commands, SENTINEL_PUBLIC_URL=auto).
+      - hostinfo:/run/hostinfo:ro
     # "edge" lets the app read the public URL from ngrok's local API (NGROK_API_URL).
     networks:
       - default
       - edge
+
+  # The app sees only its container address, so this tiny helper runs on the host network and writes the
+  # server's LAN IP (the source address of its default route) every 30 s. A DHCP change is picked up by itself.
+  hostip:
+    image: alpine:3.20
+    logging: *logging
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - hostinfo:/run/hostinfo
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ip=$$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+          if [ -n "$$ip" ]; then echo "$$ip" > /run/hostinfo/lan_ip.tmp && mv /run/hostinfo/lan_ip.tmp /run/hostinfo/lan_ip; fi
+          sleep 30
+        done
 
   # Reverse proxy: LAN users on port 80, and the target ngrok publishes.
   nginx:
@@ -158,3 +178,4 @@ networks:
 volumes:
   ollama_data:
   sentinel_data:
+  hostinfo:

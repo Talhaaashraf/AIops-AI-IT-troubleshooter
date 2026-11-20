@@ -36,6 +36,7 @@ def clear(provider):
 
 
 def stage(provider, content, source="browser"):
+    intel.reputation_provider(provider)
     if not content or len(content) > MAX_BYTES:
         raise HTTPException(413, "Select a non-empty file no larger than 32 MiB")
     sha = hashlib.sha256(content).hexdigest()

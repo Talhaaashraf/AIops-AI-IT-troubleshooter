@@ -18,7 +18,7 @@ import time
 
 from agent.toolkit import tool_schemas
 
-from . import decision_log
+from . import ai_verifier, decision_log
 from .agent_brain import findings, knowledge, session_store, specialists
 from .agent_brain.executor import execute
 from .agent_brain.planner import (REPORT_THINKING_MAX_TOKENS, _chat, _compact, evidence_digest, fix_catalog, fix_title,
@@ -73,7 +73,7 @@ def public(turn):
     return {
         "turn_id": turn["turn_id"], "state": turn["state"], "phase": turn["phase"], "device_id": turn["device_id"],
         "specialist": specialists.label(turn["specialist"]), "steps": turn["steps"], "reply": turn["reply"], "error": turn["error"],
-        "device_context": turn["context"], "can_check": turn["can_check"],
+        "device_context": turn["context"], "can_check": turn["can_check"], "second_opinion": turn.get("second_opinion"),
         "proposal": None if not proposal else {key: proposal.get(key) for key in (
             "id", "tool_id", "args", "risk", "title", "why", "state", "result", "verify", "expires")},
     }
@@ -205,7 +205,9 @@ async def _answer(turn, notes):
 async def run_turn(turn):
     try:
         notes = await _investigate(turn) if turn["can_check"] else ""
-        finish(turn, await _answer(turn, notes))
+        answer = await _answer(turn, notes)
+        await _second_opinion(turn, answer)
+        finish(turn, answer)
     except LLMUnavailableError as error:
         logger.warning("Chat turn %s: AI unavailable: %s", turn["turn_id"], error)
         turn.update(state="failed", phase="AI unavailable", error=f"The AI is not available right now ({error}). Nothing was changed on the device.")
@@ -213,6 +215,21 @@ async def run_turn(turn):
         logger.exception("Chat turn %s failed", turn["turn_id"])
         turn.update(state="failed", phase="Failed", error="The chat failed unexpectedly. Nothing was changed on the device.")
     await asyncio.to_thread(_record_turn, turn)
+
+
+async def _second_opinion(turn, answer):
+    """Optional Gemini check of this answer against the checks just run. A badge only: never gates the fix card."""
+    if not await asyncio.to_thread(ai_verifier.enabled):
+        return
+    turn["phase"] = "Gemini is checking the answer"
+    evidence = [{"check": tool_id, "args": args, "summary": result.get("summary"), "data": result.get("data")}
+                for tool_id, args, result in turn["evidence"]] or {"device_context": turn["context"]}
+    local = {**answer, "proposed_fix": (turn.get("proposal") or {}).get("title")}
+    try:
+        turn["second_opinion"] = await asyncio.to_thread(ai_verifier.verify, "chat", turn["message"], evidence, local,
+                                                         (turn["target"].label, turn["device_id"]), turn["specialist"]["id"])
+    except Exception:
+        logger.exception("Chat turn %s: second opinion failed", turn["turn_id"])
 
 
 def _record_turn(turn):
@@ -223,6 +240,7 @@ def _record_turn(turn):
         "checks": [{"tool_id": step["tool_id"], "args": step["args"], "state": step["state"], "summary": step["summary"]} for step in turn["steps"]],
         "summary": (turn["reply"] or {}).get("plain_explanation") or turn["error"],
         "proposed_fix": {"tool_id": proposal.get("tool_id"), "args": proposal.get("args")} if proposal else None,
+        "second_opinion": {key: (turn.get("second_opinion") or {}).get(key) for key in ("provider", "model", "state", "verdict", "reason")} if turn.get("second_opinion") else None,
         "approved_by": None, "note": "Chat: read-only checks only; any fix waits for a person's approval.",
     })
 
