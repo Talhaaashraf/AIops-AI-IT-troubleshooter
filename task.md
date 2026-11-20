@@ -274,9 +274,9 @@ Ask Technician becomes **AI Chat**: the user describes a problem in plain words,
 
 ## Phase 15: New login page (2026-11-19)
 
-- [~] `frontend/login.html`: full-screen animated neural-mesh canvas (nodes, glowing links, data packets travelling along links, lines to the cursor), a glass card with the "AIops Core" title, a status pill, a password field with show/hide, Remember session, Forgot credentials, and a gradient button with a loading state. It is self-contained (no CDN, so it works on a LAN server without internet). The animation pauses in background tabs and honours reduced motion
+- [~] `frontend/login.html`: full-screen animated neural-mesh canvas (large neon nodes cycling through RGB colours, glowing links, data packets travelling along links, lines to the cursor), a glass card titled "AIops / AI IT Troubleshooter" in plain text colours, a status pill, a password field with show/hide, Forgot credentials, and a gradient button with a loading state. It is self-contained (no CDN, so it works on a LAN server without internet). The animation pauses in background tabs and honours reduced motion
 - [~] Kept honest: the backend has one dashboard password, so there is no Operator ID field and no SSO/SAML button. "Forgot credentials" explains where the password is set, and the status pill states only what is true
-- [~] Remember session is real: ticked keeps the 30-day cookie, unticked gives a browser-session cookie. Clients that send no checkbox (scripts, e2e) keep 30 days. Test in `tests/test_chat_agent.py`
+- [~] No Remember session option (removed on request): sign-in always lasts 30 days, as before. Test in `tests/test_chat_agent.py`
 - Not checked: the look in a real browser (no browser on the laptop)
 
 ## Alignment review (2026-11-04)

@@ -135,12 +135,8 @@ async def login_submit(request: Request):
     if not check_password(str(form.get("password", ""))):
         return RedirectResponse(url="/login?error=1", status_code=303)
     response = RedirectResponse(url="/", status_code=303)
-    # "Remember session" keeps the sign-in for 30 days; without it the cookie ends when the browser closes.
-    # Callers that send no checkbox at all (scripts, the e2e checks) keep the 30 days.
-    remember = "remember" in form or "remember_present" not in form
     # Secure over https (ngrok); plain http on the LAN still needs a non-secure cookie to work.
-    response.set_cookie(SESSION_COOKIE_NAME, session_token(), httponly=True, samesite="lax",
-                        max_age=60 * 60 * 24 * 30 if remember else None, secure=request.url.scheme == "https")
+    response.set_cookie(SESSION_COOKIE_NAME, session_token(), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, secure=request.url.scheme == "https")
     return response
 
 
